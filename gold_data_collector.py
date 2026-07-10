@@ -64,14 +64,36 @@ def get_gold_usd_price():
     return float(price)
 
 
-def get_usd_mmk_rate():
+MAX_DAILY_CHANGE_PCT = 15  # reject a rate that jumps more than this vs yesterday
+
+
+def get_usd_mmk_rate(previous_rate=None):
+    """Tries sources in order. If a candidate rate deviates from
+    previous_rate by more than MAX_DAILY_CHANGE_PCT, it's treated as
+    suspicious (likely an API glitch/format change) and the NEXT source
+    is tried instead of blindly accepting it — this is what silently let
+    a ~113% rate spike into the dataset before."""
+    suspicious = []
+
+    def is_ok(rate):
+        if previous_rate is None:
+            return True
+        change_pct = abs(rate - previous_rate) / previous_rate * 100
+        if change_pct > MAX_DAILY_CHANGE_PCT:
+            suspicious.append((rate, change_pct))
+            print(f"  Rejected rate {rate} — {change_pct:.1f}% jump from "
+                  f"yesterday's {previous_rate} (> {MAX_DAILY_CHANGE_PCT}% threshold)",
+                  file=sys.stderr)
+            return False
+        return True
+
     # Primary: Myanmar Currency API (community-run parallel market rate)
     try:
         data = fetch_json(MYANMAR_FX_API)
         for entry in data.get("data", []):
             if entry.get("currency") == "USD":
                 buy = float(entry["buy"])
-                if buy > 100:
+                if buy > 100 and is_ok(buy):
                     return buy
     except (URLError, ValueError, KeyError, TimeoutError) as e:
         print(f"Myanmar FX API failed: {e}", file=sys.stderr)
@@ -80,19 +102,25 @@ def get_usd_mmk_rate():
     try:
         data = fetch_json(CBM_API)
         rate = float(data["rates"]["USD"])
-        if rate > 100:
+        if rate > 100 and is_ok(rate):
             return rate
     except (URLError, ValueError, KeyError, TimeoutError) as e:
         print(f"CBM API failed: {e}", file=sys.stderr)
 
+    if suspicious:
+        raise RuntimeError(
+            f"All sources returned suspicious rates vs yesterday's {previous_rate}: "
+            f"{suspicious}. Refusing to write a possibly-bad value — check the "
+            f"APIs manually and/or raise MAX_DAILY_CHANGE_PCT if this jump is real."
+        )
     raise RuntimeError("Could not fetch USD/MMK rate from any source today")
 
 
-def load_existing_dates(path):
+def load_existing_rows(path):
     if not os.path.exists(path):
-        return set()
+        return []
     with open(path, newline="", encoding="utf-8") as f:
-        return {row["date"] for row in csv.DictReader(f)}
+        return list(csv.DictReader(f))
 
 
 def append_row(path, row, fieldnames):
@@ -108,14 +136,22 @@ def main():
     today = date.today().isoformat()
     fieldnames = ["date", "gold_usd_per_oz", "usd_mmk_rate", "gold_mmk_per_tical"]
 
-    existing = load_existing_dates(CSV_PATH)
-    if today in existing:
+    existing_rows = load_existing_rows(CSV_PATH)
+    existing_dates = {row["date"] for row in existing_rows}
+    if today in existing_dates:
         print(f"[{today}] Already have today's data — skipping.")
         return
 
+    previous_rate = None
+    if existing_rows:
+        try:
+            previous_rate = float(existing_rows[-1]["usd_mmk_rate"])
+        except (KeyError, ValueError):
+            previous_rate = None
+
     try:
         gold_usd = get_gold_usd_price()
-        usd_mmk = get_usd_mmk_rate()
+        usd_mmk = get_usd_mmk_rate(previous_rate)
     except Exception as e:
         print(f"[{today}] FAILED to fetch data: {e}", file=sys.stderr)
         sys.exit(1)
