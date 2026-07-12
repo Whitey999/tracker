@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gold & Currency Tracker</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body data-theme="dark">
+<div class="container">
+
+    <!-- HEADER -->
+    <div class="header">
+        <div class="header-left">
+            <div class="logo">🪙</div>
+            <div class="header-titles">
+                <h1>GOLD & CURRENCY TRACKER</h1>
+                <div class="header-sub">Myanmar Market · Real-time data</div>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="live-badge">
+                <span class="live-dot"></span>
+                <span class="live-text">LIVE</span>
+            </div>
+            <button id="darkmode-toggle" class="darkmode-btn">☀️ Light Mode</button>
+        </div>
+    </div>
+
+    <!-- STAT CARDS -->
+    <div class="cards-row">
+        <div class="card gold-card" id="gold-card" data-type="gold">
+            <div class="card-top">
+                <div class="card-label">GOLD PRICE</div>
+                <div class="card-icon">📈</div>
+            </div>
+            <div class="card-value" id="gold-price">Loading...</div>
+            <div class="card-change positive" id="gold-change">▲ 0.00%</div>
+            <div class="card-unit">MMK per tical</div>
+        </div>
+        <div class="card usd-card" id="usd-card" data-type="usd">
+            <div class="card-top">
+                <div class="card-label">USD RATE</div>
+                <div class="card-icon">💵</div>
+            </div>
+            <div class="card-value" id="usd-rate">Loading...</div>
+            <div class="card-change positive" id="usd-change">▲ 0.00%</div>
+            <div class="card-unit">MMK per USD (buy / sell)</div>
+        </div>
+        <div class="card trend-card" id="trend-card" data-type="trend">
+            <div class="card-top">
+                <div class="card-label">MARKET TREND</div>
+                <div class="card-icon">📊</div>
+            </div>
+            <div class="card-value" id="trend">LOADING</div>
+            <div class="card-change" id="confidence">Analyzing...</div>
+            <div class="card-unit" id="trend-card-unit">2007 – 2026</div>
+        </div>
+    </div>
+
+    <!-- DYNAMIC CONTENT -->
+    <div id="dynamic-content">
+
+        <!-- GOLD TAB -->
+        <div id="gold-content" class="content-section active">
+
+            <div class="section">
+                <div class="section-header">
+                    <h2>📊 GOLD PRICE HISTORY</h2>
+                    <div class="time-buttons">
+                        <button class="time-btn gold-btn active" data-range="10y">10Y</button>
+                        <button class="time-btn gold-btn" data-range="1y">1Y</button>
+                        <button class="time-btn gold-btn" data-range="1m">1M</button>
+                        <button class="time-btn gold-btn" data-range="1w">1W</button>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="goldChart"></canvas>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-header">
+                    <h2>📅 GOLD DETAILED HISTORY</h2>
+                    <button class="view-more gold-view">VIEW MORE ▼</button>
+                </div>
+                <div class="table-container">
+                    <table class="price-table">
+                        <thead>
+                            <tr><th>DATE</th><th>PRICE (MMK/tical)</th><th>CHANGE</th></tr>
+                        </thead>
+                        <tbody id="gold-table-body">
+                            <tr><td colspan="3">Loading data...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div id="gold-data-source-note" style="font-size:11px;opacity:0.55;margin-top:8px;"></div>
+            </div>
+
+            <div class="section">
+                <h2>🤖 7-DAY PRICE FORECAST (SARIMA Model)</h2>
+                <div class="forecast-box">
+                    <div class="forecast-header">
+                        <span class="forecast-badge uptrend" id="ml-forecast-badge">📊 Loading...</span>
+                        <span class="forecast-period" id="ml-forecast-period">Next 7 trading days</span>
+                    </div>
+                    <div id="ml-forecast-warning" style="display:none;background:rgba(255,180,0,0.12);border:1px solid rgba(255,180,0,0.4);border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:13px;"></div>
+                    <div class="table-container">
+                        <table class="price-table">
+                            <thead>
+                                <tr><th>DATE</th><th>FORECAST (MMK/tical)</th><th>80% RANGE</th></tr>
+                            </thead>
+                            <tbody id="ml-forecast-body">
+                                <tr><td colspan="3">Loading forecast...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="forecast-footer">
+                        <div class="forecast-note" id="ml-forecast-note">📊 Loading model info...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>🔮 10-YEAR GOLD FORECAST</h2>
+                <div class="forecast-box">
+                    <div class="forecast-header">
+                        <span class="forecast-badge uptrend" id="gold-trend-badge">📈 ANALYZING</span>
+                        <span class="forecast-period">Next 10 years · Regression + momentum model</span>
+                    </div>
+                    <div class="forecast-visual">
+                        <div class="forecast-bar">
+                            <div class="bar-fill" id="gold-bar-fill" style="width:50%;"></div>
+                        </div>
+                        <div class="forecast-steps" id="gold-forecast-steps">
+                            <div class="step">Loading forecast...</div>
+                        </div>
+                    </div>
+                    <div class="forecast-footer">
+                        <div class="confidence-high" id="gold-confidence">✅ Loading...</div>
+                        <div class="forecast-note">📊 Linear regression + 5-yr momentum · 2007–2026 dataset</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- USD TAB -->
+        <div id="usd-content" class="content-section">
+
+            <div class="section">
+                <div class="section-header">
+                    <h2>📊 USD EXCHANGE RATE HISTORY</h2>
+                    <div class="time-buttons">
+                        <button class="time-btn usd-btn active" data-range="10y">10Y</button>
+                        <button class="time-btn usd-btn" data-range="1y">1Y</button>
+                        <button class="time-btn usd-btn" data-range="1m">1M</button>
+                        <button class="time-btn usd-btn" data-range="1w">1W</button>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="usdChart"></canvas>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-header">
+                    <h2>📅 USD DETAILED HISTORY</h2>
+                    <button class="view-more usd-view">VIEW MORE ▼</button>
+                </div>
+                <div class="table-container">
+                    <table class="price-table">
+                        <thead>
+                            <tr><th>DATE</th><th>RATE (MMK/USD)</th><th>CHANGE</th></tr>
+                        </thead>
+                        <tbody id="usd-table-body">
+                            <tr><td colspan="3">Loading data...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>💱 CURRENCY CONVERTER</h2>
+                <div class="converter">
+                    <input type="number" id="amount" value="100" placeholder="Amount" min="0">
+                    <select id="from-currency">
+                        <option value="USD">USD - US Dollar</option>
+                        <option value="EUR">EUR - Euro</option>
+                        <option value="GBP">GBP - British Pound</option>
+                        <option value="THB">THB - Thai Baht</option>
+                        <option value="SGD">SGD - Singapore Dollar</option>
+                        <option value="CNY">CNY - Chinese Yuan</option>
+                        <option value="INR">INR - Indian Rupee</option>
+                        <option value="JPY">JPY - Japanese Yen</option>
+                    </select>
+                    <span class="conv-arrow">→</span>
+                    <select id="to-currency">
+                        <option value="MMK" selected>MMK - Myanmar Kyat</option>
+                    </select>
+                    <button id="convert-btn">Convert</button>
+                </div>
+                <div class="conversion-result" id="conversion-result">Enter amount to convert</div>
+            </div>
+
+            <div class="section">
+                <h2>🔮 10-YEAR USD FORECAST</h2>
+                <div class="forecast-box">
+                    <div class="forecast-header">
+                        <span class="forecast-badge uptrend" id="usd-trend-badge">📈 ANALYZING</span>
+                        <span class="forecast-period">Next 10 years · Regression + momentum model</span>
+                    </div>
+                    <div class="forecast-visual">
+                        <div class="forecast-bar">
+                            <div class="bar-fill" id="usd-bar-fill" style="width:50%;"></div>
+                        </div>
+                        <div class="forecast-steps" id="usd-forecast-steps">
+                            <div class="step">Loading forecast...</div>
+                        </div>
+                    </div>
+                    <div class="forecast-footer">
+                        <div class="confidence-high" id="usd-confidence">✅ Loading...</div>
+                        <div class="forecast-note">📊 Linear regression + 5-yr momentum · 2007–2026 dataset</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TREND TAB -->
+        <div id="trend-content" class="content-section">
+            <div class="section">
+                <h2>📊 MARKET ANALYSIS</h2>
+                <div class="analysis-box" id="analysis-box">
+                    <div class="analysis-item">
+                        <span class="analysis-label">Overall Long-term Trend</span>
+                        <span class="analysis-value" id="overall-trend">Loading...</span>
+                    </div>
+                    <div class="analysis-item">
+                        <span class="analysis-label">Gold Growth Since 2007</span>
+                        <span class="analysis-value" id="gold-30d-change">Loading...</span>
+                    </div>
+                    <div class="analysis-item">
+                        <span class="analysis-label">USD/MMK Change Since 2007</span>
+                        <span class="analysis-value" id="usd-30d-change">Loading...</span>
+                    </div>
+                    <div class="analysis-item">
+                        <span class="analysis-label">5-Year Volatility</span>
+                        <span class="analysis-value" id="volatility">Loading...</span>
+                    </div>
+                    <div class="analysis-item">
+                        <span class="analysis-label">Best Time to Buy Gold</span>
+                        <span class="analysis-value" id="gold-advice">Loading...</span>
+                    </div>
+                    <div class="analysis-item">
+                        <span class="analysis-label">Best Time to Buy USD</span>
+                        <span class="analysis-value" id="usd-advice">Loading...</span>
+                    </div>
+                </div>
+            </div>
+            <div class="section">
+                <h2>📈 RECOMMENDATIONS</h2>
+                <div class="recommendations">
+                    <div class="rec-card">
+                        <div class="rec-icon">🥇</div>
+                        <div class="rec-title">GOLD</div>
+                        <div class="rec-action hold" id="gold-action">HOLD</div>
+                        <div class="rec-reason" id="gold-reason">Analyzing data...</div>
+                    </div>
+                    <div class="rec-card">
+                        <div class="rec-icon">💵</div>
+                        <div class="rec-title">USD</div>
+                        <div class="rec-action buy" id="usd-action">HOLD</div>
+                        <div class="rec-reason" id="usd-reason">Analyzing data...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <div class="refresh-section">
+        <button id="refresh-btn" class="refresh-btn">🔄 Refresh All Data</button>
+        <div class="last-update" id="last-update">Last update: Just now</div>
+    </div>
+
+</div>
+
+<!-- FULL HISTORY MODAL -->
+<div id="history-modal" class="modal-overlay">
+    <div class="modal-box">
+        <div class="modal-header">
+            <div>
+                <div class="modal-title" id="modal-title">Full History</div>
+                <div class="modal-subtitle" id="modal-subtitle"></div>
+            </div>
+            <button class="modal-close" id="modal-close">✕</button>
+        </div>
+        <div class="modal-range-buttons">
+            <button class="modal-range-btn" data-range="10y">10Y</button>
+            <button class="modal-range-btn" data-range="1y">1Y</button>
+            <button class="modal-range-btn" data-range="1m">1M</button>
+            <button class="modal-range-btn active" data-range="1w">1W</button>
+        </div>
+        <div class="modal-table-wrap">
+            <table class="price-table">
+                <thead>
+                    <tr>
+                        <th id="modal-col-date">DATE</th>
+                        <th id="modal-col-val">VALUE</th>
+                        <th>CHANGE</th>
+                    </tr>
+                </thead>
+                <tbody id="modal-table-body"></tbody>
+            </table>
+        </div>
+        <div class="modal-footer">
+            <span id="modal-count"></span>
+            <button class="modal-close-btn" id="modal-close-btn">Close</button>
+        </div>
+    </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
