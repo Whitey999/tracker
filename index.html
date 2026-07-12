@@ -55,7 +55,6 @@
             </div>
             <div class="card-value" id="trend">LOADING</div>
             <div class="card-change" id="confidence">Analyzing...</div>
-            <div class="card-unit" id="trend-card-unit">2007 – 2026</div>
         </div>
     </div>
 
@@ -99,35 +98,11 @@
             </div>
 
             <div class="section">
-                <h2>🤖 7-DAY PRICE FORECAST (SARIMA Model)</h2>
-                <div class="forecast-box">
-                    <div class="forecast-header">
-                        <span class="forecast-badge uptrend" id="ml-forecast-badge">📊 Loading...</span>
-                        <span class="forecast-period" id="ml-forecast-period">Next 7 trading days</span>
-                    </div>
-                    <div id="ml-forecast-warning" style="display:none;background:rgba(255,180,0,0.12);border:1px solid rgba(255,180,0,0.4);border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:13px;"></div>
-                    <div class="table-container">
-                        <table class="price-table">
-                            <thead>
-                                <tr><th>DATE</th><th>FORECAST (MMK/tical)</th><th>80% RANGE</th></tr>
-                            </thead>
-                            <tbody id="ml-forecast-body">
-                                <tr><td colspan="3">Loading forecast...</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                    <div class="forecast-footer">
-                        <div class="forecast-note" id="ml-forecast-note">📊 Loading model info...</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="section">
-                <h2>🔮 10-YEAR GOLD FORECAST</h2>
+                <h2>🔮 7-DAY GOLD FORECAST</h2>
                 <div class="forecast-box">
                     <div class="forecast-header">
                         <span class="forecast-badge uptrend" id="gold-trend-badge">📈 ANALYZING</span>
-                        <span class="forecast-period">Next 10 years · Regression + momentum model</span>
+                        <span class="forecast-period">Next 7 days · Regression + momentum model</span>
                     </div>
                     <div class="forecast-visual">
                         <div class="forecast-bar">
@@ -139,7 +114,7 @@
                     </div>
                     <div class="forecast-footer">
                         <div class="confidence-high" id="gold-confidence">✅ Loading...</div>
-                        <div class="forecast-note">📊 Linear regression + 5-yr momentum · 2007–2026 dataset</div>
+                        <div class="forecast-note">📊 Linear regression + recent momentum · Last 30 daily records</div>
                     </div>
                 </div>
             </div>
@@ -204,11 +179,11 @@
             </div>
 
             <div class="section">
-                <h2>🔮 10-YEAR USD FORECAST</h2>
+                <h2>🔮 7-DAY USD FORECAST</h2>
                 <div class="forecast-box">
                     <div class="forecast-header">
                         <span class="forecast-badge uptrend" id="usd-trend-badge">📈 ANALYZING</span>
-                        <span class="forecast-period">Next 10 years · Regression + momentum model</span>
+                        <span class="forecast-period">Next 7 days · Regression + momentum model</span>
                     </div>
                     <div class="forecast-visual">
                         <div class="forecast-bar">
@@ -220,7 +195,7 @@
                     </div>
                     <div class="forecast-footer">
                         <div class="confidence-high" id="usd-confidence">✅ Loading...</div>
-                        <div class="forecast-note">📊 Linear regression + 5-yr momentum · 2007–2026 dataset</div>
+                        <div class="forecast-note">📊 Linear regression + recent momentum · Last 30 daily records</div>
                     </div>
                 </div>
             </div>
@@ -236,15 +211,15 @@
                         <span class="analysis-value" id="overall-trend">Loading...</span>
                     </div>
                     <div class="analysis-item">
-                        <span class="analysis-label">Gold Growth Since 2007</span>
+                        <span class="analysis-label">Gold 30-Day Change</span>
                         <span class="analysis-value" id="gold-30d-change">Loading...</span>
                     </div>
                     <div class="analysis-item">
-                        <span class="analysis-label">USD/MMK Change Since 2007</span>
+                        <span class="analysis-label">USD 30-Day Change</span>
                         <span class="analysis-value" id="usd-30d-change">Loading...</span>
                     </div>
                     <div class="analysis-item">
-                        <span class="analysis-label">5-Year Volatility</span>
+                        <span class="analysis-label">Volatility</span>
                         <span class="analysis-value" id="volatility">Loading...</span>
                     </div>
                     <div class="analysis-item">
