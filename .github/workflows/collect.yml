@@ -24,10 +24,21 @@ jobs:
       - name: Run data collector
         run: python gold_data_collector.py
 
+      - name: Install forecast dependencies
+        run: pip install pandas statsmodels scikit-learn
+
+      - name: Run SARIMA forecast model
+        run: python train_forecast_model.py
+        continue-on-error: true   # don't block the data commit if a model has an off day
+
+      - name: Run scikit-learn forecast + backtest comparison
+        run: python train_forecast_sklearn.py
+        continue-on-error: true
+
       - name: Commit and push updated data
         run: |
           git config user.name "gold-data-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add gold_history.csv
-          git diff --staged --quiet && echo "No changes to commit" || git commit -m "Daily gold data update ($(date -u +%Y-%m-%d))"
+          git add gold_history.csv forecast.json forecast_sklearn.json
+          git diff --staged --quiet && echo "No changes to commit" || git commit -m "Daily gold data + forecast update ($(date -u +%Y-%m-%d))"
           git push
