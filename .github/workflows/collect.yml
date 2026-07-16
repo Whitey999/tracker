@@ -1,5 +1,4 @@
-name: Run backfill(one-time)
-run : python backfill.py
+
 name: Daily Gold Data Collection
 on:
   schedule:
