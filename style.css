@@ -244,7 +244,6 @@ body[data-theme="light"] .rec-title { color:#8892a4; }
 .rec-action { font-size:22px; font-weight:900; margin-bottom:8px; letter-spacing:0.04em; }
 .rec-action.buy  { color:#2ecc71; }
 .rec-action.hold { color:#f39c12; }
-.rec-action.sell { color:#e74c3c; }
 .rec-reason { font-size:11px; color:#3a4a6a; line-height:1.5; }
 body[data-theme="light"] .rec-reason { color:#7a88a8; }
 
