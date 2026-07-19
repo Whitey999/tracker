@@ -9,6 +9,9 @@
 
 const GOLD_API             = "https://api.gold-api.com/price/XAU";
 const FREE_GOLD_HISTORY_API= "https://freegoldapi.com/data/latest.json"; // real daily gold (USD/oz) history, no key needed
+// Real 7-day gold forecast, trained by train_forecast_model.py (SARIMA) and
+// committed daily by GitHub Actions after the data collector runs.
+const ML_FORECAST_URL       = "https://raw.githubusercontent.com/Whitey999/tracker/main/forecast.json";
 // ⚠️ SECURITY NOTE: this key lives in client-side JS, so it is visible to
 // anyone who opens browser DevTools / View Source on this page. GoldAPI.io's
 // free tier is quota-limited (~100 requests/month). Before deploying this
@@ -57,12 +60,19 @@ const ANNUAL_GOLD_USD = {
     2019:1517, 2020:1891, 2021:1829, 2022:1800,
     2023:1943, 2024:2386, 2025:3000, 2026:4120
 };
+// NOTE on 2021-2026: these years use approximate BLACK-MARKET annual
+// averages (what gold shops/money changers actually use), not the
+// official CBM reference rate (~2,100 flat) — sourced from media
+// reports (Eleven Myanmar, Global New Light of Myanmar, Myanmar Now,
+// CurrencyTransfer) since no free API has real historical black-market
+// data this far back. These are approximate annual averages, not
+// precise daily figures — refine if better sourcing is found.
 const ANNUAL_USD_MMK = {
     2007:1296, 2008:1205, 2009:1050, 2010:980,
     2011:850,  2012:860,  2013:975,  2014:1050,
     2015:1300, 2016:1360, 2017:1360, 2018:1520,
-    2019:1520, 2020:1330, 2021:1800, 2022:2100,
-    2023:2100, 2024:2100, 2025:2100, 2026:2100
+    2019:1520, 2020:1330, 2021:1800, 2022:3300,
+    2023:3900, 2024:4500, 2025:4200, 2026:4300
 };
 
 // ── Monthly gold seeds Jan 2025 – Jun 2026 ───────────────────────
@@ -129,7 +139,6 @@ async function loadAllData() {
 
     updateGoldDisplay();
     updateUsdDisplay();
-    updateTrendCardUnit();
     loadGoldChart(currentGoldRange);
     loadUsdChart(currentUsdRange);
     updateMarketAnalysis();
@@ -296,15 +305,46 @@ async function getUsdToMmkRate() {
     try{const r=await fetch(MYANMAR_FX_API),d=await r.json(),u=(d.data||[]).find(c=>c.currency==="USD");if(u){const x=parseFloat(u.buy);if(x>100)return x;}}catch(_){}
     return 2100;
 }
+// Myanmar has TWO real, legitimate USD/MMK rates that coexist: an
+// official/CBM reference rate (~2,000-2,200) and a black market/street
+// rate (what gold shops & money changers actually use, historically
+// ~3,400-4,800+, confirmed accurate by on-the-ground verification).
+// This app tracks the black-market rate (myanmar-currency-api.github.io
+// is a parallel-market source), so the sanity check only rejects
+// clearly-broken values (e.g. 0, negative, or wildly implausible),
+// not anything that looks "different from the official rate."
+const RATE_PLAUSIBLE_MIN = 1500;
+const RATE_PLAUSIBLE_MAX = 8000;
+
+function isRateSane(rate){
+    return rate >= RATE_PLAUSIBLE_MIN && rate <= RATE_PLAUSIBLE_MAX;
+}
+
 async function loadUsdRate() {
+    const rejected = [];
     try{
         const r=await fetch(MYANMAR_FX_API),d=await r.json();
         myanmarFxData=d.data||[];
         const u=myanmarFxData.find(c=>c.currency==="USD");
-        if(u){const buy=parseFloat(u.buy),sell=parseFloat(u.sell);if(buy>100){liveUsdRate=buy;liveUsdSell=sell;patchUsd();return liveUsdRate;}}
+        if(u){
+            const buy=parseFloat(u.buy),sell=parseFloat(u.sell);
+            if(isRateSane(buy)){liveUsdRate=buy;liveUsdSell=sell;patchUsd();return liveUsdRate;}
+            if(buy>100) rejected.push(`Myanmar FX: ${buy}`);
+        }
     }catch(e){console.warn("Myanmar FX:",e);}
-    try{const r=await fetch(CBM_API),d=await r.json(),rate=parseFloat(d.rates?.USD);if(rate>100){liveUsdRate=rate;liveUsdSell=rate;patchUsd();return liveUsdRate;}}catch(e){console.warn("CBM:",e);}
-    try{const r=await fetch(CURRENCY_API+"?base=USD&quotes=MMK"),d=await r.json();const rate=Array.isArray(d)?d[d.length-1]?.rate:(d.rate??d.rates?.MMK);if(rate>100){liveUsdRate=rate;liveUsdSell=rate;patchUsd();return liveUsdRate;}}catch(e){console.warn("Frankfurter:",e);}
+    try{
+        const r=await fetch(CBM_API),d=await r.json(),rate=parseFloat(d.rates?.USD);
+        if(isRateSane(rate)){liveUsdRate=rate;liveUsdSell=rate;patchUsd();return liveUsdRate;}
+        if(rate>100) rejected.push(`CBM: ${rate}`);
+    }catch(e){console.warn("CBM:",e);}
+    try{
+        const r=await fetch(CURRENCY_API+"?base=USD&quotes=MMK"),d=await r.json();
+        const rate=Array.isArray(d)?d[d.length-1]?.rate:(d.rate??d.rates?.MMK);
+        if(isRateSane(rate)){liveUsdRate=rate;liveUsdSell=rate;patchUsd();return liveUsdRate;}
+        if(rate>100) rejected.push(`Frankfurter: ${rate}`);
+    }catch(e){console.warn("Frankfurter:",e);}
+
+    if(rejected.length) console.warn(`All USD/MMK sources looked implausible (outside ${RATE_PLAUSIBLE_MIN}-${RATE_PLAUSIBLE_MAX}): ${rejected.join(", ")}. Falling back to a rough estimate.`);
     liveUsdRate=2100;liveUsdSell=2090;patchUsd();return liveUsdRate;
 }
 
@@ -339,10 +379,6 @@ function updateUsdDisplay(){
     const el=document.getElementById("usd-change");
     el.innerHTML=`${chg>=0?"▲":"▼"} ${Math.abs(chg).toFixed(2)}%`;
     el.className=`card-change ${chg>=0?"positive":"negative"}`;
-}
-function updateTrendCardUnit(){
-    const el=document.getElementById("trend-card-unit");
-    if(el)el.textContent=`2007 – ${new Date().getFullYear()}`;
 }
 
 // ================================================================
@@ -464,6 +500,43 @@ function usdSlice(range){
     }
     if(range==="1y") return usdDailyHistory.length>=12?usdDailyHistory:usdHistory.slice(-12);
     return usdHistory;
+}
+
+// ── Daily regression forecast engine (for 7-Day widget) ──────────
+// Same regression+momentum approach as buildForecast(), but indexed by
+// trading day instead of by year, and projecting real calendar dates
+// forward instead of years.
+function buildDailyForecast(dailyHist, field, aheadDays) {
+    if (!dailyHist || dailyHist.length < 2) return { forecasts: [], r2: 0, recentAvgChg: 0 };
+    const recentHist = dailyHist.slice(-30); // regression window: last 30 real daily records
+    const xs = recentHist.map((d, i) => i), ys = recentHist.map(d => d[field]);
+    const n = xs.length, sx = xs.reduce((a, b) => a + b, 0), sy = ys.reduce((a, b) => a + b, 0);
+    const sxy = xs.reduce((s, x, i) => s + x * ys[i], 0), sxx = xs.reduce((s, x) => s + x * x, 0);
+    const den = n * sxx - sx * sx, slope = den ? (n * sxy - sx * sy) / den : 0, intercept = (sy - slope * sx) / n;
+    const ym = sy / n, ssTot = ys.reduce((s, y) => s + (y - ym) ** 2, 0);
+    const ssRes = ys.reduce((s, y, i) => s + (y - (slope * xs[i] + intercept)) ** 2, 0);
+    const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 1;
+
+    const rec = dailyHist.slice(-7); // momentum window: last 7 real daily records
+    const avgChg = rec.length > 1 ? rec.reduce((s, d, i) => i === 0 ? 0 : s + d.change, 0) / (rec.length - 1) : 0;
+
+    const lastReal = dailyHist[dailyHist.length - 1];
+    const lastDate = new Date((lastReal.iso || localIso(new Date())) + "T00:00:00");
+    const baseX = recentHist.length - 1;
+
+    const forecasts = [];
+    for (let i = 1; i <= aheadDays; i++) {
+        const rv = slope * (baseX + i) + intercept;
+        const lv = lastReal[field];
+        const mv = lv * Math.pow(1 + avgChg / 100, i);
+        const bl = rv * 0.5 + mv * 0.5;
+        const rd = field === "price" ? Math.round(bl / 1000) * 1000 : Math.round(bl);
+        const pv = i === 1 ? lv : forecasts[i - 2].value;
+        const fd = new Date(lastDate); fd.setDate(fd.getDate() + i);
+        const label = fd.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+        forecasts.push({ year: label, date: label, value: rd, change: pv > 0 ? ((rd - pv) / pv * 100) : 0, r2 });
+    }
+    return { forecasts, r2, recentAvgChg: avgChg };
 }
 
 // ── Regression forecast engine ───────────────────────────────────
@@ -668,27 +741,66 @@ function loadUsdTable(histData,fcData){
 // ================================================================
 //  FORECASTS (widget steps)
 // ================================================================
-function updateForecasts(){updateGoldForecast();updateUsdForecast();}
+async function updateForecasts(){await updateGoldForecast();updateUsdForecast();}
 
-function updateGoldForecast(){
-    const {forecasts,r2,recentAvgChg}=buildForecast(goldHistory,"price",10);
+async function updateGoldForecast(){
+    try{
+        const res = await fetch(ML_FORECAST_URL + `?t=${Date.now()}`);
+        if(!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if(!data.forecast || !data.forecast.length) throw new Error("empty forecast");
+
+        const lastReal = data.last_real;
+        const lastVal  = data.forecast[data.forecast.length-1].value;
+        const isUp = lastVal >= lastReal.value;
+        const dq = data.data_quality || {};
+        const conf = Math.min(95, Math.max(40, Math.round(dq.pct_real || 70)));
+
+        document.getElementById("gold-trend-badge").innerHTML = isUp?"📈 UPTREND":"📉 DOWNTREND";
+        document.getElementById("gold-trend-badge").className = `forecast-badge ${isUp?"uptrend":""}`;
+        document.getElementById("gold-bar-fill").style.width = `${conf}%`;
+        document.getElementById("gold-confidence").innerHTML =
+            `✅ ${data.model || "SARIMA"} model · ${dq.real_days ?? "?"} real / ${dq.interpolated_days ?? 0} interpolated day(s) (${dq.pct_real ?? "?"}% real)`
+            + (data.warning ? ` · ⚠️ ${data.warning}` : "");
+
+        const stepsEl = document.getElementById("gold-forecast-steps");
+        stepsEl.innerHTML = "";
+        let prev = lastReal.value;
+        data.forecast.forEach((f,i)=>{
+            const changePct = ((f.value - prev) / prev * 100);
+            const disp = f.value>=1000000 ? (f.value/1000000).toFixed(2)+"M" : Math.round(f.value/1000)+"K";
+            const st=document.createElement("div");st.className="step";
+            st.innerHTML=`<div class="step-day">${f.date}</div><div class="step-price">${disp}</div><div class="step-change ${changePct>=0?"positive":"negative"}">${changePct>=0?"▲":"▼"} ${Math.abs(changePct).toFixed(1)}%</div>`;
+            stepsEl.appendChild(st);
+            if(i<data.forecast.length-1){const a=document.createElement("div");a.className="step-arrow";a.innerHTML="→";stepsEl.appendChild(a);}
+            prev = f.value;
+        });
+        return; // success — don't fall through to the JS regression fallback
+    }catch(e){
+        console.warn("Python SARIMA forecast.json unavailable, falling back to JS regression:", e);
+    }
+
+    // Fallback: in-browser regression on real daily data (used only if
+    // forecast.json can't be reached — e.g. offline, or the model hasn't
+    // run yet on a brand-new repo).
+    const {forecasts,r2,recentAvgChg}=buildDailyForecast(goldDailyHistory,"price",7);
     const isUp=recentAvgChg>0,conf=Math.min(88,Math.round(55+r2*30));
     document.getElementById("gold-trend-badge").innerHTML=isUp?"📈 UPTREND":"📉 DOWNTREND";
     document.getElementById("gold-trend-badge").className=`forecast-badge ${isUp?"uptrend":""}`;
     document.getElementById("gold-bar-fill").style.width=`${conf}%`;
-    document.getElementById("gold-confidence").innerHTML=`✅ Confidence: ${conf}% · R²=${r2.toFixed(2)} · Avg/yr: +${recentAvgChg.toFixed(1)}%`;
-    renderSteps("gold-forecast-steps",forecasts.slice(0,4),true);
+    document.getElementById("gold-confidence").innerHTML=`⚠️ Fallback estimate (JS regression) · Confidence: ${conf}% · R²=${r2.toFixed(2)} · Avg/day: ${recentAvgChg>=0?"+":""}${recentAvgChg.toFixed(2)}%`;
+    renderSteps("gold-forecast-steps",forecasts.slice(0,7),true);
 }
 function updateUsdForecast(){
-    const {forecasts,r2,recentAvgChg}=buildForecast(usdHistory,"rate",10);
+    const {forecasts,r2,recentAvgChg}=buildDailyForecast(usdDailyHistory,"rate",7);
     const isUp=recentAvgChg>0,conf=Math.min(80,Math.round(45+r2*30));
     document.getElementById("usd-trend-badge").innerHTML=isUp?"📈 UPTREND":"📉 STABLE";
     document.getElementById("usd-trend-badge").className=`forecast-badge ${isUp?"uptrend":""}`;
     document.getElementById("usd-bar-fill").style.width=`${conf}%`;
     const ce=document.getElementById("usd-confidence");
     ce.className=conf>=65?"confidence-high":"confidence-medium";
-    ce.innerHTML=`${conf>=65?"✅":"⚠️"} Confidence: ${conf}% · R²=${r2.toFixed(2)} · Avg/yr: ${recentAvgChg.toFixed(1)}%`;
-    renderSteps("usd-forecast-steps",forecasts.slice(0,4),false);
+    ce.innerHTML=`${conf>=65?"✅":"⚠️"} Confidence: ${conf}% · R²=${r2.toFixed(2)} · Avg/day: ${recentAvgChg>=0?"+":""}${recentAvgChg.toFixed(2)}%`;
+    renderSteps("usd-forecast-steps",forecasts.slice(0,7),false);
 }
 function renderSteps(id,steps,isGold){
     const c=document.getElementById(id);c.innerHTML="";
@@ -705,24 +817,43 @@ function renderSteps(id,steps,isGold){
 // ================================================================
 //  MARKET ANALYSIS
 // ================================================================
+// Percent change over the last N daily records (falls back to 0 if not enough real data).
+function pctChangeOverDays(dailyHist, field, days) {
+    if (!dailyHist || dailyHist.length < 2) return 0;
+    const last = dailyHist[dailyHist.length - 1][field];
+    const idx = Math.max(0, dailyHist.length - 1 - days);
+    const base = dailyHist[idx][field];
+    return base > 0 ? ((last - base) / base * 100) : 0;
+}
+
 function updateMarketAnalysis(){
     const gH=goldHistory,uH=usdHistory;
-    const g19=gH.length>1?((gH[gH.length-1].price-gH[0].price)/gH[0].price*100):0;
-    const u19=uH.length>1?((uH[uH.length-1].rate-uH[0].rate)/uH[0].rate*100):0;
-    const g5=gH.length>=6?((gH[gH.length-1].price-gH[gH.length-6].price)/gH[gH.length-6].price*100):g19;
-    const {recentAvgChg:gs}=buildForecast(gH,"price",1);
-    const {recentAvgChg:us}=buildForecast(uH,"rate",1);
-    const trend=gs>0?"UPTREND":"CONSOLIDATION",vol=Math.abs(g5)>50?"High":"Medium";
-    const ga=g5>50?"Caution — overextended vs 5-yr avg":"Long-term uptrend intact";
-    const ua=us>0?"USD rate trending up":"Monitor for devaluation risk";
-    const gAct=g5>80?"HOLD":"BUY",uAct=us>10?"HOLD":"BUY";
+    const g30=pctChangeOverDays(goldDailyHistory,"price",30);
+    const u30=pctChangeOverDays(usdDailyHistory,"rate",30);
+    const g5=gH.length>=6?((gH[gH.length-1].price-gH[gH.length-6].price)/gH[gH.length-6].price*100):0;
+
+    // Trend + BUY/SELL/HOLD recommendations are now based on the last 1 MONTH
+    // of real daily data (g30/u30), not the old annual-momentum basis.
+    const trend=g30>0?"UPTREND":"CONSOLIDATION";
+    const vol=Math.abs(g5)>50?"High":"Medium";
+
+    let gAct,ga;
+    if(g30>8){gAct="SELL";ga="Price surged over the past month — consider taking profit.";}
+    else if(g30<-8){gAct="BUY";ga="Price dipped over the past month — potential buying opportunity.";}
+    else{gAct="HOLD";ga="Price fairly stable over the past month — no strong signal.";}
+
+    let uAct,ua;
+    if(u30>5){uAct="BUY";ua="USD/MMK rising — buying USD now may beat further increases.";}
+    else if(u30<-5){uAct="SELL";ua="USD/MMK falling — a good time to convert USD back to MMK.";}
+    else{uAct="HOLD";ua="USD/MMK fairly stable over the past month — no strong signal.";}
+
     setEl("overall-trend",trend,`analysis-value ${trend==="UPTREND"?"uptrend":""}`);
-    setEl("gold-30d-change",`${g19>=0?"+":""}${g19.toFixed(0)}% since 2007`,`analysis-value ${g19>=0?"positive":"negative"}`);
-    setEl("usd-30d-change",`${u19>=0?"+":""}${u19.toFixed(0)}% since 2007`,`analysis-value ${u19>=0?"positive":"negative"}`);
+    setEl("gold-30d-change",`${g30>=0?"+":""}${g30.toFixed(2)}%`,`analysis-value ${g30>=0?"positive":"negative"}`);
+    setEl("usd-30d-change",`${u30>=0?"+":""}${u30.toFixed(2)}%`,`analysis-value ${u30>=0?"positive":"negative"}`);
     setEl("volatility",vol);setEl("gold-advice",ga);setEl("usd-advice",ua);
-    setEl("gold-action",gAct,`rec-action ${gAct==="HOLD"?"hold":"buy"}`);setEl("gold-reason",ga);
-    setEl("usd-action",uAct,`rec-action ${uAct==="BUY"?"buy":"hold"}`);setEl("usd-reason",ua);
-    setEl("trend",trend);setEl("confidence",`Confidence: ${Math.round(55+Math.abs(g5)/10)}%`);
+    setEl("gold-action",gAct,`rec-action ${gAct.toLowerCase()}`);setEl("gold-reason",ga);
+    setEl("usd-action",uAct,`rec-action ${uAct.toLowerCase()}`);setEl("usd-reason",ua);
+    setEl("trend",trend);setEl("confidence",`Confidence: ${Math.min(99,Math.round(55+Math.abs(g30)*2))}%`);
 }
 function setEl(id,html,cls){const e=document.getElementById(id);if(!e)return;e.innerHTML=html;if(cls!==undefined)e.className=cls;}
 

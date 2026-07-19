@@ -36,7 +36,7 @@ import csv
 import json
 import os
 import sys
-from datetime import date
+from datetime import date, datetime
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
@@ -64,54 +64,64 @@ def get_gold_usd_price():
     return float(price)
 
 
-MAX_DAILY_CHANGE_PCT = 15  # reject a rate that jumps more than this vs yesterday
+# Myanmar has TWO real, legitimate USD/MMK rates that coexist:
+#   - Official/CBM reference rate: ~2,000-2,200
+#   - Black market / street rate (what gold shops & money changers
+#     actually use): historically ~3,400-4,800+, confirmed accurate by
+#     on-the-ground verification with a money changer.
+# A rate outside this WIDE range is almost certainly a real data error
+# (e.g. an API returning garbage, a decimal-point glitch, or a totally
+# wrong field) — but anything within it is plausible and should NOT be
+# rejected just for looking different from a single fixed number.
+RATE_PLAUSIBLE_MIN = 1500
+RATE_PLAUSIBLE_MAX = 8000
 
 
 def get_usd_mmk_rate(previous_rate=None):
-    """Tries sources in order. If a candidate rate deviates from
-    previous_rate by more than MAX_DAILY_CHANGE_PCT, it's treated as
-    suspicious (likely an API glitch/format change) and the NEXT source
-    is tried instead of blindly accepting it — this is what silently let
-    a ~113% rate spike into the dataset before."""
+    """Tries sources in order (Myanmar FX black-market rate first, since
+    that's what this app is meant to track; CBM official rate as
+    fallback only). Only rejects a rate if it's outside the wide
+    plausible range for ANY real Myanmar USD/MMK rate — narrow
+    "vs yesterday" or "vs a fixed 2100 reference" checks were tried
+    before and incorrectly rejected genuine black-market values."""
     suspicious = []
 
     def is_ok(rate):
-        if previous_rate is None:
-            return True
-        change_pct = abs(rate - previous_rate) / previous_rate * 100
-        if change_pct > MAX_DAILY_CHANGE_PCT:
-            suspicious.append((rate, change_pct))
-            print(f"  Rejected rate {rate} — {change_pct:.1f}% jump from "
-                  f"yesterday's {previous_rate} (> {MAX_DAILY_CHANGE_PCT}% threshold)",
+        if not (RATE_PLAUSIBLE_MIN <= rate <= RATE_PLAUSIBLE_MAX):
+            suspicious.append(rate)
+            print(f"  Rejected implausible rate {rate} (outside "
+                  f"{RATE_PLAUSIBLE_MIN}-{RATE_PLAUSIBLE_MAX} range)",
                   file=sys.stderr)
             return False
         return True
 
-    # Primary: Myanmar Currency API (community-run parallel market rate)
+    # Primary: Myanmar Currency API (community-run parallel/black market rate —
+    # this is the rate this app is meant to track, matching what gold
+    # shops and money changers actually use)
     try:
         data = fetch_json(MYANMAR_FX_API)
         for entry in data.get("data", []):
             if entry.get("currency") == "USD":
                 buy = float(entry["buy"])
-                if buy > 100 and is_ok(buy):
+                if is_ok(buy):
                     return buy
     except (URLError, ValueError, KeyError, TimeoutError) as e:
         print(f"Myanmar FX API failed: {e}", file=sys.stderr)
 
-    # Fallback: Central Bank of Myanmar official rate
+    # Fallback: Central Bank of Myanmar official rate (only used if the
+    # black-market source above is unreachable)
     try:
         data = fetch_json(CBM_API)
         rate = float(data["rates"]["USD"])
-        if rate > 100 and is_ok(rate):
+        if is_ok(rate):
             return rate
     except (URLError, ValueError, KeyError, TimeoutError) as e:
         print(f"CBM API failed: {e}", file=sys.stderr)
 
     if suspicious:
         raise RuntimeError(
-            f"All sources returned suspicious rates vs yesterday's {previous_rate}: "
-            f"{suspicious}. Refusing to write a possibly-bad value — check the "
-            f"APIs manually and/or raise MAX_DAILY_CHANGE_PCT if this jump is real."
+            f"All sources returned implausible rates: {suspicious}. "
+            f"Refusing to write a possibly-bad value — check the APIs manually."
         )
     raise RuntimeError("Could not fetch USD/MMK rate from any source today")
 
@@ -121,6 +131,16 @@ def load_existing_rows(path):
         return []
     with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
+
+
+def _parse_any_date(s):
+    s = (s or "").strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def append_row(path, row, fieldnames):
@@ -142,16 +162,9 @@ def main():
         print(f"[{today}] Already have today's data — skipping.")
         return
 
-    previous_rate = None
-    if existing_rows:
-        try:
-            previous_rate = float(existing_rows[-1]["usd_mmk_rate"])
-        except (KeyError, ValueError):
-            previous_rate = None
-
     try:
         gold_usd = get_gold_usd_price()
-        usd_mmk = get_usd_mmk_rate(previous_rate)
+        usd_mmk = get_usd_mmk_rate()
     except Exception as e:
         print(f"[{today}] FAILED to fetch data: {e}", file=sys.stderr)
         sys.exit(1)
