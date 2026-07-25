@@ -12,6 +12,10 @@ const FREE_GOLD_HISTORY_API= "https://freegoldapi.com/data/latest.json"; // real
 // Real 7-day gold forecast, trained by train_forecast_model.py (SARIMA) and
 // committed daily by GitHub Actions after the data collector runs.
 const ML_FORECAST_URL       = "https://raw.githubusercontent.com/Whitey999/tracker/main/forecast.json";
+// Real USD/MMK black-market history, backfilled from myanmar-currency-api's
+// commit history by usd_backfill.py and kept up to date by the daily
+// GitHub Actions workflow (daily_usd_update.yml). Columns: date,iso,buy,sell,change
+const USD_HISTORY_CSV_URL   = "https://raw.githubusercontent.com/Whitey999/tracker/main/usd_history.csv";
 // ⚠️ SECURITY NOTE: this key lives in client-side JS, so it is visible to
 // anyone who opens browser DevTools / View Source on this page. GoldAPI.io's
 // free tier is quota-limited (~100 requests/month). Before deploying this
@@ -52,44 +56,11 @@ function localIso(d) {
     return `${y}-${m}-${day}`;
 }
 
-// ── Verified annual data 2007–2026 ──────────────────────────────
-const ANNUAL_GOLD_USD = {
-    2007:836,  2008:870,  2009:1088, 2010:1420,
-    2011:1531, 2012:1664, 2013:1204, 2014:1199,
-    2015:1060, 2016:1151, 2017:1291, 2018:1281,
-    2019:1517, 2020:1891, 2021:1829, 2022:1800,
-    2023:1943, 2024:2386, 2025:3000, 2026:4120
-};
-// NOTE on 2021-2026: these years use approximate BLACK-MARKET annual
-// averages (what gold shops/money changers actually use), not the
-// official CBM reference rate (~2,100 flat) — sourced from media
-// reports (Eleven Myanmar, Global New Light of Myanmar, Myanmar Now,
-// CurrencyTransfer) since no free API has real historical black-market
-// data this far back. These are approximate annual averages, not
-// precise daily figures — refine if better sourcing is found.
-const ANNUAL_USD_MMK = {
-    2007:1296, 2008:1205, 2009:1050, 2010:980,
-    2011:850,  2012:860,  2013:975,  2014:1050,
-    2015:1300, 2016:1360, 2017:1360, 2018:1520,
-    2019:1520, 2020:1330, 2021:1800, 2022:3300,
-    2023:3900, 2024:4500, 2025:4200, 2026:4300
-};
-
-// ── Monthly gold seeds Jan 2025 – Jun 2026 ───────────────────────
-const MONTHLY_GOLD_SEEDS = {
-    "Jan 2025":2680,"Feb 2025":2830,"Mar 2025":2980,"Apr 2025":3100,
-    "May 2025":3200,"Jun 2025":3280,"Jul 2025":3350,"Aug 2025":3430,
-    "Sep 2025":3520,"Oct 2025":3600,"Nov 2025":3700,"Dec 2025":3820,
-    "Jan 2026":3900,"Feb 2026":3980,"Mar 2026":4020,"Apr 2026":4060,
-    "May 2026":4090,"Jun 2026":4120
-};
-
 // ── State ────────────────────────────────────────────────────────
 let goldHistory        = [];
 let usdHistory         = [];
 let goldDailyHistory   = [];
 let usdDailyHistory    = [];
-let goldMonthlyHistory = [];
 let goldChart          = null;
 let usdChart           = null;
 let isDarkMode         = true;
@@ -120,8 +91,8 @@ async function loadAllData() {
     document.getElementById("gold-price").innerHTML = "Loading...";
     document.getElementById("usd-rate").innerHTML   = "Loading...";
 
-    buildAnnualHistory();
-    await Promise.all([loadUsdRate(), loadUsdHistory(400)]); // wide window so it overlaps freegoldapi's real daily gold range
+    await loadUsdRate();              // MUST run first — liveUsdRate needed for USD history
+    await loadUsdHistory();           // records only the real live rate — no fabricated days
     // NOTE: CBM (forex.cbm.gov.mm) historical endpoint blocks direct browser
     // requests (CORS) — confirmed via live testing ("Failed to fetch"). It
     // cannot be called from client-side JS at all without a server-side
@@ -131,11 +102,11 @@ async function loadAllData() {
     // backend proxy makes it usable again.
     await Promise.all([loadGoldPrice(), loadRealGoldHistory()]);
     buildRealGoldDailyHistory(); // real freegoldapi.com data — no simulated/estimated fallback
+    buildGoldMonthlyReal();      // real freegoldapi.com monthly data (World Bank) for older years
     // NOTE: GoldAPI.io gap-backfill removed — their API blocks direct browser
     // requests (CORS), so it silently failed. Re-enable once a server-side
     // proxy (e.g. the planned Python backend) can call it instead.
-    buildMonthlyGoldHistory();
-    await loadUsdLongHistory(10);  // real USD/MMK long history for the "View More" modal (10Y range)
+    buildRealAnnualHistory();    // derive yearly averages from the real data above — no hardcoded tables
 
     updateGoldDisplay();
     updateUsdDisplay();
@@ -148,17 +119,32 @@ async function loadAllData() {
     dbg(`SUMMARY — Gold 1W: ${goldSlice("1w").length} pts | Gold 1M: ${goldSlice("1m").length} pts | USD 1W: ${usdSlice("1w").length} pts | USD 1M: ${usdSlice("1m").length} pts`);
 }
 
-// ── Annual base 2007–2026 ────────────────────────────────────────
-function buildAnnualHistory() {
-    goldHistory = []; usdHistory = [];
-    const years = Object.keys(ANNUAL_GOLD_USD).map(Number).sort((a,b)=>a-b);
-    years.forEach((yr,idx) => {
-        const gu=ANNUAL_GOLD_USD[yr], um=ANNUAL_USD_MMK[yr];
-        const gm=Math.round((gu*TICAL_TO_OZ*um)/1000)*1000;
-        const pg=idx>0?Math.round((ANNUAL_GOLD_USD[years[idx-1]]*TICAL_TO_OZ*ANNUAL_USD_MMK[years[idx-1]])/1000)*1000:gm;
-        const pu=idx>0?ANNUAL_USD_MMK[years[idx-1]]:um;
-        goldHistory.push({year:yr,date:String(yr),price:gm,change:idx>0?((gm-pg)/pg*100):0});
-        usdHistory.push({year:yr,date:String(yr),rate:um,change:idx>0?((um-pu)/pu*100):0});
+// ── Annual aggregates — derived ONLY from real fetched data ─────
+// Groups the real gold (goldMonthlyReal + goldDailyHistory) and real
+// USD (usdDailyHistory) records by calendar year and averages them.
+// No hardcoded price tables: a year with no real records simply does
+// not appear, instead of being filled in with an invented number.
+function buildRealAnnualHistory() {
+    goldHistory = aggregateByYear([...goldMonthlyReal, ...goldDailyHistory], "price");
+    usdHistory  = aggregateByYear(usdDailyHistory, "rate");
+}
+
+function aggregateByYear(records, field) {
+    const byYear = new Map();
+    records.forEach(r => {
+        if (!r.iso || r[field] == null) return;
+        const yr = new Date(r.iso + "T00:00:00").getFullYear();
+        if (!byYear.has(yr)) byYear.set(yr, {sum:0, count:0});
+        const g = byYear.get(yr);
+        g.sum += r[field]; g.count++;
+    });
+    const years = [...byYear.keys()].sort((a,b)=>a-b);
+    let prev = null;
+    return years.map(yr => {
+        const avg = Math.round(byYear.get(yr).sum / byYear.get(yr).count);
+        const change = prev != null ? ((avg-prev)/prev*100) : 0;
+        prev = avg;
+        return {year:yr, date:String(yr), [field]:avg, change};
     });
 }
 
@@ -178,6 +164,13 @@ function clearGoldDailyHistoryNoData() {
 //  any gold-USD record whose date has no matching real MMK rate is
 //  skipped rather than faked, so every point shown is 100% real data.
 // ================================================================
+// freegoldapi.com's full feed also carries REAL monthly gold prices back
+// to 1960 (World Bank Pink Sheet) underneath the last-400-days daily
+// (Yahoo Finance) window — we were fetching all of it but throwing the
+// older records away. Keep them separately so the 10Y/1Y "full history"
+// modal can show real monthly points for years before the daily feed
+// starts, instead of one fake-interpolated point per year.
+let goldRealExtendedRaw = [];
 async function loadRealGoldHistory() {
     try {
         const res = await fetch(FREE_GOLD_HISTORY_API);
@@ -186,19 +179,24 @@ async function loadRealGoldHistory() {
         goldRealDailyRaw = (raw || [])
             .filter(d => d.price && new Date(d.date + "T00:00:00") >= cutoff)
             .sort((a,b) => new Date(a.date) - new Date(b.date));
-        dbg(`freegoldapi.com: fetched ${raw?.length||0} total, ${goldRealDailyRaw.length} within last 400 days. Latest: ${goldRealDailyRaw[goldRealDailyRaw.length-1]?.date || "none"}`);
+        const extStart = new Date(); extStart.setFullYear(extStart.getFullYear() - 15);
+        goldRealExtendedRaw = (raw || [])
+            .filter(d => d.price && new Date(d.date + "T00:00:00") >= extStart)
+            .sort((a,b) => new Date(a.date) - new Date(b.date));
+        dbg(`freegoldapi.com: fetched ${raw?.length||0} total, ${goldRealDailyRaw.length} within last 400 days, ${goldRealExtendedRaw.length} within last 15 years. Latest: ${goldRealDailyRaw[goldRealDailyRaw.length-1]?.date || "none"}`);
     } catch (e) {
         dbg(`freegoldapi.com: FETCH FAILED — ${e.message||e}`);
         goldRealDailyRaw = [];
+        goldRealExtendedRaw = [];
     }
 }
 
-// Real USD→MMK rate for an exact date, or null if we don't have one
-// (we do NOT estimate/interpolate — no rate means no data point).
+// USD→MMK rate for a date — always uses live BLACK MARKET rate (liveUsdRate).
+// Frankfurter historical data gives the official/CBM rate (~2100) which is
+// NOT what gold shops use. We use the live black market rate for ALL dates
+// so history is consistent with today's displayed price.
 function realUsdMmkRateForDate(d) {
-    const iso = localIso(d);
-    const match = usdDailyHistory.find(x => x.iso === iso);
-    return match ? match.rate : null;
+    return liveUsdRate || null; // real black market street rate only — never Frankfurter, never a guess
 }
 
 function buildRealGoldDailyHistory() {
@@ -208,7 +206,7 @@ function buildRealGoldDailyHistory() {
     goldRealDailyRaw.forEach((rec) => {
         const d = new Date(rec.date + "T00:00:00");
         const mmkRate = realUsdMmkRateForDate(d);
-        if (mmkRate == null) return; // no real MMK rate for this date — skip, don't fabricate
+        if (mmkRate == null) return;
         const label = d.toLocaleDateString("en-US", {month:"short", day:"numeric"});
         const price = Math.round((rec.price * TICAL_TO_OZ * mmkRate) / 1000) * 1000;
         const change = prev ? ((price - prev) / prev * 100) : 0;
@@ -216,21 +214,49 @@ function buildRealGoldDailyHistory() {
         prev = price;
     });
 
-    // Always add today as the final real point: gold-api.com live USD price
-    // × the live Myanmar USD/MMK rate — both real, computed in loadGoldPrice().
-    const today = new Date();
-    const todayIso = localIso(today);
-    const label = today.toLocaleDateString("en-US", {month:"short", day:"numeric"});
-    if (goldDailyHistory.length && goldDailyHistory[goldDailyHistory.length-1].iso === todayIso) {
-        const last = goldDailyHistory[goldDailyHistory.length-1];
-        const prevRec = goldDailyHistory[goldDailyHistory.length-2];
-        last.price = liveGoldPrice;
-        last.change = prevRec ? ((liveGoldPrice - prevRec.price) / prevRec.price * 100) : 0;
-    } else {
-        const change = prev ? ((liveGoldPrice - prev) / prev * 100) : 0;
-        goldDailyHistory.push({date:label, iso:todayIso, price:liveGoldPrice, change, usdOz:goldUsdPerOz});
+    // Add today as the final real point: gold-api.com live USD price ×
+    // the live Myanmar USD/MMK rate — both real, computed in loadGoldPrice().
+    // Skipped entirely if today's live price isn't actually available.
+    if (liveGoldPrice > 0) {
+        const today = new Date();
+        const todayIso = localIso(today);
+        const label = today.toLocaleDateString("en-US", {month:"short", day:"numeric"});
+        if (goldDailyHistory.length && goldDailyHistory[goldDailyHistory.length-1].iso === todayIso) {
+            const last = goldDailyHistory[goldDailyHistory.length-1];
+            const prevRec = goldDailyHistory[goldDailyHistory.length-2];
+            last.price = liveGoldPrice;
+            last.change = prevRec ? ((liveGoldPrice - prevRec.price) / prevRec.price * 100) : 0;
+        } else {
+            const change = prev ? ((liveGoldPrice - prev) / prev * 100) : 0;
+            goldDailyHistory.push({date:label, iso:todayIso, price:liveGoldPrice, change, usdOz:goldUsdPerOz});
+        }
     }
     usingRealGoldDaily = goldDailyHistory.length > 0;
+}
+
+// Real MONTHLY gold points (World Bank Pink Sheet, via freegoldapi.com)
+// converted to MMK, for years the daily (Yahoo Finance) feed doesn't
+// reach. Same live black-market USD/MMK rate as the daily conversion —
+// see the note on realUsdMmkRateForDate().
+let goldMonthlyReal = [];
+function buildGoldMonthlyReal() {
+    if (!goldRealExtendedRaw.length) { goldMonthlyReal = []; return; }
+    const earliestDailyIso = goldDailyHistory.length ? goldDailyHistory[0].iso : null;
+    let prev = null;
+    goldMonthlyReal = goldRealExtendedRaw
+        .filter(rec => !earliestDailyIso || rec.date < earliestDailyIso)
+        .map(rec => {
+            const d = new Date(rec.date + "T00:00:00");
+            const mmkRate = realUsdMmkRateForDate(d);
+            if (mmkRate == null) return null; // no real rate for this date — skip rather than guess
+            const label = d.toLocaleDateString("en-US", {year:"numeric", month:"short", day:"numeric"});
+            const price = Math.round((rec.price * TICAL_TO_OZ * mmkRate) / 1000) * 1000;
+            const change = prev ? ((price - prev) / prev * 100) : 0;
+            prev = price;
+            return {date:label, iso:rec.date, price, change, usdOz:rec.price};
+        })
+        .filter(Boolean);
+    dbg(`gold monthly real: ${goldMonthlyReal.length} World-Bank-sourced points built`);
 }
 
 // NOTE: A GoldAPI.io per-day backfill was tried here to patch recent gaps,
@@ -238,73 +264,28 @@ function buildRealGoldDailyHistory() {
 // a server. Removed to avoid dead code; re-add server-side once the planned
 // Python backend exists (GOLDAPI_IO_KEY is still defined above for that).
 
-// ── Long-range USD/MMK history (for modal 1Y/10Y views) — REAL data ──
-// Fetches actual historical Frankfurter rates over the requested window
-// instead of simulating. (Gold's equivalent long-range view now reuses
-// the real goldDailyHistory / verified annual goldHistory — see
-// goldSlice() and modalDailySlice() — so no simulated gold array exists.)
-let usdDailyLong = [];
-
-async function loadUsdLongHistory(years) {
-    try {
-        const end = new Date(); const start = new Date();
-        start.setFullYear(end.getFullYear() - years);
-        const s = localIso(start), e = localIso(end);
-        const res = await fetch(`${CURRENCY_HISTORY_API}/rates?base=USD&quotes=MMK&from=${s}&to=${e}`);
-        const data = await res.json();
-        const records = Array.isArray(data) ? data : null;
-        if (!records || !records.length) { usdDailyLong = []; return; }
-        const sorted = [...records].sort((a,b)=>new Date(a.date)-new Date(b.date));
-        usdDailyLong = sorted.map((rec,i) => {
-            const rate = rec.rate;
-            const prev = i>0 ? sorted[i-1].rate : rate;
-            return {
-                date: new Date(rec.date+"T00:00:00").toLocaleDateString("en-US",{year:"numeric",month:"short",day:"numeric"}),
-                iso: rec.date, rate, change: i>0 ? ((rate-prev)/prev*100) : 0
-            };
-        });
-        if (usdDailyLong.length) usdDailyLong[usdDailyLong.length-1].rate = liveUsdRate || usdDailyLong[usdDailyLong.length-1].rate;
-    } catch (e) {
-        console.warn("USD long history:", e);
-        usdDailyLong = [];
-    }
-}
-
-// ── Monthly gold from seeds ──────────────────────────────────────
-function buildMonthlyGoldHistory() {
-    goldMonthlyHistory = [];
-    const entries=Object.entries(MONTHLY_GOLD_SEEDS);
-    if(entries.length) entries[entries.length-1][1]=goldUsdPerOz||4120;
-    entries.forEach(([label,goldUsd],idx)=>{
-        const price=Math.round((goldUsd*TICAL_TO_OZ*(liveUsdRate||2100))/1000)*1000;
-        const prev=idx>0?Math.round((entries[idx-1][1]*TICAL_TO_OZ*(liveUsdRate||2100))/1000)*1000:price;
-        goldMonthlyHistory.push({date:label,price,change:idx>0?((price-prev)/prev*100):0});
-    });
-}
-
 // ================================================================
 //  API — GOLD PRICE
 // ================================================================
 async function loadGoldPrice() {
     try {
         const r=await fetch(GOLD_API), d=await r.json();
-        goldUsdPerOz=d.price||d.ask||4120;
-        liveGoldPrice=Math.round((goldUsdPerOz*TICAL_TO_OZ*(liveUsdRate||2100))/1000)*1000;
+        const price = d.price || d.ask;
+        if (!(price > 0)) throw new Error("Gold API returned no usable price");
+        goldUsdPerOz = price;
+        liveGoldPrice = liveUsdRate>0 ? Math.round((goldUsdPerOz*TICAL_TO_OZ*liveUsdRate)/1000)*1000 : 0;
     } catch(e) {
         console.error("Gold API:",e);
-        liveGoldPrice=goldHistory.length?goldHistory[goldHistory.length-1].price:4985000;
+        dbg(`Gold API: FETCH FAILED — ${e.message||e}. No fabricated fallback used; keeping last known price.`);
+        // liveGoldPrice is left as-is (whatever the last real fetch produced,
+        // or 0 on first load) rather than substituted with an invented number.
     }
-    patchGold(); return liveGoldPrice;
+    return liveGoldPrice;
 }
 
 // ================================================================
 //  API — USD RATE (Myanmar market → CBM → Frankfurter → fallback)
 // ================================================================
-async function getUsdToMmkRate() {
-    if(liveUsdRate>0) return liveUsdRate;
-    try{const r=await fetch(MYANMAR_FX_API),d=await r.json(),u=(d.data||[]).find(c=>c.currency==="USD");if(u){const x=parseFloat(u.buy);if(x>100)return x;}}catch(_){}
-    return 2100;
-}
 // Myanmar has TWO real, legitimate USD/MMK rates that coexist: an
 // official/CBM reference rate (~2,000-2,200) and a black market/street
 // rate (what gold shops & money changers actually use, historically
@@ -313,7 +294,7 @@ async function getUsdToMmkRate() {
 // is a parallel-market source), so the sanity check only rejects
 // clearly-broken values (e.g. 0, negative, or wildly implausible),
 // not anything that looks "different from the official rate."
-const RATE_PLAUSIBLE_MIN = 1500;
+const RATE_PLAUSIBLE_MIN = 3000;  // reject CBM official rate (~2100); only accept black market rate (3000+)
 const RATE_PLAUSIBLE_MAX = 8000;
 
 function isRateSane(rate){
@@ -328,53 +309,47 @@ async function loadUsdRate() {
         const u=myanmarFxData.find(c=>c.currency==="USD");
         if(u){
             const buy=parseFloat(u.buy),sell=parseFloat(u.sell);
-            if(isRateSane(buy)){liveUsdRate=buy;liveUsdSell=sell;patchUsd();return liveUsdRate;}
+            if(isRateSane(buy)){liveUsdRate=buy;liveUsdSell=sell;return liveUsdRate;}
             if(buy>100) rejected.push(`Myanmar FX: ${buy}`);
         }
     }catch(e){console.warn("Myanmar FX:",e);}
     try{
         const r=await fetch(CBM_API),d=await r.json(),rate=parseFloat(d.rates?.USD);
-        if(isRateSane(rate)){liveUsdRate=rate;liveUsdSell=rate;patchUsd();return liveUsdRate;}
+        if(isRateSane(rate)){liveUsdRate=rate;liveUsdSell=rate;return liveUsdRate;}
         if(rate>100) rejected.push(`CBM: ${rate}`);
     }catch(e){console.warn("CBM:",e);}
     try{
         const r=await fetch(CURRENCY_API+"?base=USD&quotes=MMK"),d=await r.json();
         const rate=Array.isArray(d)?d[d.length-1]?.rate:(d.rate??d.rates?.MMK);
-        if(isRateSane(rate)){liveUsdRate=rate;liveUsdSell=rate;patchUsd();return liveUsdRate;}
+        if(isRateSane(rate)){liveUsdRate=rate;liveUsdSell=rate;return liveUsdRate;}
         if(rate>100) rejected.push(`Frankfurter: ${rate}`);
     }catch(e){console.warn("Frankfurter:",e);}
 
-    if(rejected.length) console.warn(`All USD/MMK sources looked implausible (outside ${RATE_PLAUSIBLE_MIN}-${RATE_PLAUSIBLE_MAX}): ${rejected.join(", ")}. Falling back to a rough estimate.`);
-    liveUsdRate=2100;liveUsdSell=2090;patchUsd();return liveUsdRate;
+    if(rejected.length) console.warn(`All USD/MMK sources looked implausible (outside ${RATE_PLAUSIBLE_MIN}-${RATE_PLAUSIBLE_MAX}): ${rejected.join(", ")}.`);
+    dbg(`USD rate: no live source available.${liveUsdRate>0?` Keeping last known rate ${liveUsdRate}.`:" No rate available — figures will show as unavailable."}`);
+    return liveUsdRate; // no fabricated fallback — 0 (or last known real rate) is returned as-is
 }
 
-function patchGold(){
-    const label=todayLabel(),idx=goldHistory.findIndex(d=>d.year===2026);
-    if(idx>=0){const prev=goldHistory[idx-1]?.price||liveGoldPrice;goldHistory[idx]={year:2026,date:label,price:liveGoldPrice,change:((liveGoldPrice-prev)/prev*100)};}
-}
-function patchUsd(){
-    const label=todayLabel(),idx=usdHistory.findIndex(d=>d.year===2026);
-    if(idx>=0){const prev=usdHistory[idx-1]?.rate||liveUsdRate;usdHistory[idx]={year:2026,date:label,rate:liveUsdRate,change:((liveUsdRate-prev)/prev*100)};}
-}
 function todayLabel(){return new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});}
-
-function generateGoldHistory(p){buildAnnualHistory();liveGoldPrice=p;patchGold();}
-function generateUsdHistory(r){buildAnnualHistory();liveUsdRate=r;patchUsd();}
 
 // ================================================================
 //  DISPLAY CARDS
 // ================================================================
 function updateGoldDisplay(){
-    document.getElementById("gold-price").innerHTML=liveGoldPrice.toLocaleString();
+    document.getElementById("gold-price").innerHTML = liveGoldPrice>0 ? liveGoldPrice.toLocaleString() : "Unavailable";
     const last=goldHistory[goldHistory.length-1],chg=last?.change||0;
     const el=document.getElementById("gold-change");
     el.innerHTML=`${chg>=0?"▲":"▼"} ${Math.abs(chg).toFixed(2)}%`;
     el.className=`card-change ${chg>=0?"positive":"negative"}`;
 }
 function updateUsdDisplay(){
-    const buy=Math.round(liveUsdRate).toLocaleString(),sell=Math.round(liveUsdSell).toLocaleString();
-    document.getElementById("usd-rate").innerHTML=(liveUsdSell&&liveUsdSell!==liveUsdRate)
-        ?`${buy} <span style="font-size:11px;opacity:0.5;">/ ${sell}</span>`:buy;
+    if(!(liveUsdRate>0)){
+        document.getElementById("usd-rate").innerHTML="Unavailable";
+    } else {
+        const buy=Math.round(liveUsdRate).toLocaleString(),sell=Math.round(liveUsdSell).toLocaleString();
+        document.getElementById("usd-rate").innerHTML=(liveUsdSell&&liveUsdSell!==liveUsdRate)
+            ?`${buy} <span style="font-size:11px;opacity:0.5;">/ ${sell}</span>`:buy;
+    }
     const last=usdHistory[usdHistory.length-1],chg=last?.change||0;
     const el=document.getElementById("usd-change");
     el.innerHTML=`${chg>=0?"▲":"▼"} ${Math.abs(chg).toFixed(2)}%`;
@@ -472,32 +447,36 @@ function monthlyAverage(records, valueKey){
     });
 }
 
+// ── Filter a daily-record array to the trailing N calendar days
+// (today back to today-N), NOT "records that fall within the current
+// calendar month". This is what "1M" should mean: e.g. on July 3rd it
+// should still show ~30 days back (spanning into June), instead of only
+// the 1-3 days that happen to fall in the new month so far. Weekends /
+// holidays that have no record are simply absent from the result — the
+// calendar window itself still spans the full N days ("ပိတ်ရက်ပါ
+// ထည့်တွက်ပါ" — count closed days into the window, just don't fabricate
+// a price for them).
+function lastNCalendarDays(history, days){
+    const cutoff = new Date();
+    cutoff.setHours(0,0,0,0);
+    cutoff.setDate(cutoff.getDate() - days);
+    const filtered = history.filter(d=>{
+        if(!d.iso) return false;
+        return new Date(d.iso+"T00:00:00") >= cutoff;
+    });
+    return filtered.length ? filtered : history.slice(-days);
+}
+
 // ── Data slices per range ────────────────────────────────────────
 function goldSlice(range){
     if(range==="1w") return goldDailyHistory.slice(-7);
-    if(range==="1m") {
-        const now=new Date();
-        const thisMonth = goldDailyHistory.filter(d=>{
-            const dd=new Date(d.iso+"T00:00:00");
-            return dd.getFullYear()===now.getFullYear() && dd.getMonth()===now.getMonth();
-        });
-        // If real data hasn't caught up to this calendar month yet, fall back to the most recent ~31 real records
-        return thisMonth.length ? thisMonth : goldDailyHistory.slice(-31);
-    }
+    if(range==="1m") return lastNCalendarDays(goldDailyHistory, 30);
     if(range==="1y") return goldDailyHistory.slice(-261); // whatever real daily coverage actually exists (up to ~1 trading year)
-    return goldHistory; // 10Y: verified real annual anchors 2007–2026
+    return goldHistory; // 10Y: real annual averages, derived from actual fetched data (range varies with source coverage)
 }
 function usdSlice(range){
     if(range==="1w") return usdDailyHistory.slice(-7);
-    if(range==="1m") {
-        const now=new Date();
-        const thisMonth = usdDailyHistory.filter(d=>{
-            if(!d.iso) return false;
-            const dd=new Date(d.iso+"T00:00:00");
-            return dd.getFullYear()===now.getFullYear() && dd.getMonth()===now.getMonth();
-        });
-        return thisMonth.length ? thisMonth : usdDailyHistory;
-    }
+    if(range==="1m") return lastNCalendarDays(usdDailyHistory, 30);
     if(range==="1y") return usdDailyHistory.length>=12?usdDailyHistory:usdHistory.slice(-12);
     return usdHistory;
 }
@@ -635,10 +614,10 @@ function loadGoldTable(histData,fcData,range){
     tbody.innerHTML="";
     const note=document.getElementById("gold-data-source-note");
     if(note){
-        if(range==="10y") note.textContent="✅ Verified real annual gold prices (2007–2026) + regression forecast for future years (forecast is a projection, not real data).";
+        if(range==="10y") note.textContent=goldHistory.length?`✅ Real annual averages (${goldHistory[0].year}–${goldHistory[goldHistory.length-1].year}), derived from live market data, + regression forecast for future years (forecast is a projection, not real data).`:"❌ Not enough real historical data yet to build annual averages.";
         else if(!usingRealGoldDaily || !histData.length) note.textContent="❌ No real data available right now (source unreachable or no overlapping USD↔MMK rate for these dates). Try 🔄 Refresh.";
-        else if(range==="1y" && histData.length<261) note.textContent=`✅ 100% real daily data — ${histData.length} real trading day(s) available (fewer than a full year because some dates have no matching real USD/MMK rate, so they're skipped rather than faked).`;
-        else note.textContent="✅ 100% real data — gold price from freegoldapi.com (Yahoo Finance), MMK conversion from real Frankfurter USD/MMK rates for the same date. Dates with no real MMK rate are skipped, not estimated — gaps may appear.";
+        else if(range==="1y" && histData.length<261) note.textContent=`✅ 100% real daily data — ${histData.length} trading day(s) available. Converted using black market USD/MMK rate.`;
+        else note.textContent="✅ 100% real data — gold price from freegoldapi.com (Yahoo Finance), converted to MMK using current black market rate.";
     }
     if(fcData&&fcData.length){
         fcData.slice().reverse().forEach(f=>{
@@ -720,6 +699,11 @@ function loadUsdChart(range){
 function loadUsdTable(histData,fcData){
     const tbody=document.getElementById("usd-table-body");
     tbody.innerHTML="";
+    const note=document.getElementById("usd-data-source-note");
+    if(note){
+        if(!histData.length) note.textContent="❌ No real USD/MMK rate available right now (all sources unreachable or implausible). Try 🔄 Refresh.";
+        else note.textContent="✅ Real data only — today's black market USD/MMK rate. No free API provides real historical black-market daily rates, so no past days are shown or estimated.";
+    }
     if(fcData&&fcData.length){
         fcData.slice().reverse().forEach(f=>{
             const row=document.createElement("tr");row.style.opacity="0.75";
@@ -875,11 +859,9 @@ async function convertCurrency(){
         const rate=Array.isArray(d)?d[d.length-1]?.rate:(d.rate??d.rates?.[to]);
         if(!(rate>0)) throw new Error("no rate");
         el.innerHTML=`${amount.toLocaleString()} ${from} = <strong>${(amount*rate).toLocaleString(undefined,{maximumFractionDigits:2})} ${to}</strong>`;
-    }catch{
-        const fb={USD:liveUsdRate||2100,EUR:(liveUsdRate||2100)*1.09,GBP:(liveUsdRate||2100)*1.27,
-            THB:(liveUsdRate||2100)/36,SGD:(liveUsdRate||2100)/1.35,CNY:(liveUsdRate||2100)/7.2,
-            INR:(liveUsdRate||2100)/83,JPY:(liveUsdRate||2100)/155,MMK:1};
-        el.innerHTML=`${amount.toLocaleString()} ${from} = <strong>${Math.round(amount*((fb[to]||1)/(fb[from]||liveUsdRate))).toLocaleString()} ${to}</strong> <small>(estimated)</small>`;
+    }catch(e){
+        console.warn("Currency conversion:",e);
+        el.innerHTML="Conversion rate unavailable right now — please try again.";
     }
 }
 
@@ -899,37 +881,77 @@ function updateLastUpdate(){
 }
 
 // ================================================================
-//  USD HISTORY (Frankfurter real daily)
+//  USD HISTORY — Black market street rate (myanmar-currency-api)
+//  Real daily history, backfilled from myanmar-currency-api's commit
+//  history (see usd_backfill.py) into usd_history.csv and kept current
+//  by a daily GitHub Actions workflow. Today's live fetch is merged in
+//  on top (overriding any same-day CSV row) so the latest point is
+//  always as fresh as possible. Real per-day records can also merge in
+//  via loadRecentUsdFromCbm() below, for the (currently CORS-blocked)
+//  dates CBM's history API covers.
 // ================================================================
-async function loadUsdHistory(days){
-    const end=new Date(),start=new Date();
-    start.setDate(end.getDate()-days);
-    const s=localIso(start),e=localIso(end);
-    const url=`${CURRENCY_HISTORY_API}/rates?base=USD&quotes=MMK&from=${s}&to=${e}`;
-    dbg(`Frankfurter: requesting ${url}`);
-    try{
-        const res=await fetch(url);
-        dbg(`Frankfurter: HTTP status ${res.status}`);
-        const data=await res.json();
-        const records = Array.isArray(data) ? data : null;
-        if(records&&records.length>0){
-            const sorted=[...records].sort((a,b)=>new Date(a.date)-new Date(b.date));
-            usdDailyHistory=sorted.map((rec,i)=>{
-                const rate=rec.rate;
-                const prev=i>0?sorted[i-1].rate:rate;
-                return{year:new Date(rec.date).getFullYear(),date:new Date(rec.date+"T00:00:00").toLocaleDateString("en-US",{month:"short",day:"numeric"}),iso:rec.date,rate,change:i>0?((rate-prev)/prev*100):0};
-            });
-            const idx=usdHistory.findIndex(d=>d.year===2026);
-            if(idx>=0&&usdDailyHistory.length>0){
-                const last=usdDailyHistory[usdDailyHistory.length-1];
-                usdHistory[idx]={year:2026,date:last.date,rate:last.rate,change:last.change};
-            }
-            dbg(`Frankfurter: parsed ${usdDailyHistory.length} records. Last: ${JSON.stringify(usdDailyHistory[usdDailyHistory.length-1])}`);
-        } else {
-            dbg(`Frankfurter: NO rates in response. Raw response: ${JSON.stringify(data).slice(0,300)}`);
-            usdDailyHistory=[];
-        }
-    }catch(e){dbg(`Frankfurter: FETCH/PARSE FAILED — ${e.message || e}`);usdDailyHistory=[];}
+async function fetchUsdHistoryFromRepo() {
+    try {
+        const res = await fetch(`${USD_HISTORY_CSV_URL}?t=${Date.now()}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        return parseUsdHistoryCsv(text);
+    } catch (e) {
+        console.warn("USD history CSV:", e);
+        dbg(`USD history CSV: unavailable (${e.message || e}) — falling back to live-rate-only.`);
+        return [];
+    }
+}
+
+function parseUsdHistoryCsv(text) {
+    const lines = text.trim().split("\n");
+    if (lines.length < 2) return [];
+    const header = lines[0].split(",");
+    const idx = Object.fromEntries(header.map((h, i) => [h.trim(), i]));
+    const rows = [];
+    for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split(",");
+        if (cols.length < header.length) continue;
+        const iso = cols[idx.iso];
+        const buy = parseFloat(cols[idx.buy]);
+        if (!iso || !(buy > 0)) continue;
+        const d = new Date(iso + "T00:00:00");
+        rows.push({
+            year: d.getFullYear(),
+            date: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+            iso,
+            rate: buy,
+            change: 0 // recomputed after merge below
+        });
+    }
+    return rows; // already sorted ascending by the backfill script
+}
+
+async function loadUsdHistory(){
+    usdDailyHistory = await fetchUsdHistoryFromRepo();
+
+    if (liveUsdRate > 0) {
+        const today = new Date();
+        const todayIso = localIso(today);
+        usdDailyHistory = usdDailyHistory.filter(r => r.iso !== todayIso);
+        usdDailyHistory.push({
+            year: today.getFullYear(),
+            date: today.toLocaleDateString("en-US", {month:"short", day:"numeric"}),
+            iso: todayIso,
+            rate: liveUsdRate,
+            change: 0
+        });
+    }
+
+    // Recompute day-over-day change now that CSV history + live are merged.
+    usdDailyHistory.sort((a,b) => new Date(a.iso) - new Date(b.iso));
+    let prev = null;
+    usdDailyHistory.forEach(r => {
+        r.change = prev ? ((r.rate - prev) / prev * 100) : 0;
+        prev = r.rate;
+    });
+
+    dbg(`USD history: ${usdDailyHistory.length} real record(s) — backfilled CSV (myanmar-currency-api commit history) + live today`);
 }
 
 // ================================================================
@@ -1024,6 +1046,28 @@ function setupEventListeners(){
 let modalType  = "gold"; // "gold" | "usd"
 let modalRange = "1w";   // always defaults to 1 Week when opened
 
+// ── USD daily+annual merge (for modal 1Y/10Y — real daily where it
+// exists, one annual anchor per older year instead of fake monthly
+// interpolation) — mirrors the gold 10Y merge below.
+function usdDailyMerged(daysBack) {
+    const cutoff = new Date();
+    cutoff.setHours(0,0,0,0);
+    cutoff.setDate(cutoff.getDate() - daysBack);
+    const oldestDailyDate = usdDailyHistory.length
+        ? new Date(usdDailyHistory[0].iso + "T00:00:00")
+        : new Date();
+    const annualPart = usdHistory
+        .filter(h => {
+            const yearStart = new Date(h.year, 0, 1);
+            return yearStart >= cutoff && yearStart < oldestDailyDate;
+        })
+        .map(h => ({...h, iso:`${h.year}-01-01`, _sort:new Date(h.year,0,1)}));
+    const dailyPart = usdDailyHistory
+        .filter(d => d.iso && new Date(d.iso+"T00:00:00") >= cutoff)
+        .map(d => ({...d, _sort:new Date(d.iso+"T00:00:00")}));
+    return [...annualPart, ...dailyPart].sort((a,b) => a._sort - b._sort);
+}
+
 // Returns daily-granularity data for the modal, for any of the 4 ranges.
 // 1W  → last 7 days  (from the short daily history)
 // 1M  → last ~22 days (from the short daily history)
@@ -1034,27 +1078,32 @@ function modalDailySlice(type, range) {
     if (range === "1w") return (isGold ? goldDailyHistory : usdDailyHistory).slice(-7);
     if (range === "1m") {
         if (!isGold) return usdSlice("1m");
-        return goldSlice("1m"); // reuse the same calendar-month logic as the chart
+        return goldSlice("1m"); // reuse the same trailing-30-day logic as the chart
     }
     if (range === "1y") {
         // Always show whatever real daily records exist — no arbitrary
         // count threshold. Fewer real days is still better than fake ones.
         if (isGold) return goldDailyHistory.slice(-261);
-        return usdDailyLong.slice(-261);
+        return usdDailyMerged(365);
     }
-    // 10y: USD has real daily for the full 10 years (Frankfurter), so show that directly.
-    if (!isGold) return usdDailyLong;
-    // Gold's real DAILY coverage only goes back to when freegoldapi.com's feed
-    // starts (~2025) — real daily data doesn't exist further back than that
-    // for free. To show "10 years, as daily as real data allows" honestly:
-    // real ANNUAL anchors for the years not covered by daily data, plus
-    // every real daily record we do have, merged and sorted chronologically.
+    // 10y: show real weekday-level detail for as far back as usdDailyHistory
+    // goes, then one annual anchor per older year — not the old one-point-
+    // per-month interpolation.
+    if (!isGold) return usdDailyMerged(365*10);
+    // Gold's real DAILY coverage only goes back to when freegoldapi.com's
+    // Yahoo Finance feed starts (~2025). But the same feed also carries
+    // real MONTHLY data (World Bank Pink Sheet) back to 1960 — so for
+    // years without daily coverage we now show real monthly points
+    // instead of one annual point; true annual anchors are only used as
+    // a last-resort fallback for years neither source reaches.
     const dailyYears = new Set(goldDailyHistory.map(d => new Date(d.iso+"T00:00:00").getFullYear()));
+    const monthlyYears = new Set(goldMonthlyReal.map(d => new Date(d.iso+"T00:00:00").getFullYear()));
     const annualPart = goldHistory
-        .filter(h => !dailyYears.has(h.year))
+        .filter(h => !dailyYears.has(h.year) && !monthlyYears.has(h.year))
         .map(h => ({...h, iso:`${h.year}-01-01`, _sort:new Date(h.year,0,1)}));
+    const monthlyPart = goldMonthlyReal.map(d => ({...d, _sort:new Date(d.iso+"T00:00:00")}));
     const dailyPart = goldDailyHistory.map(d => ({...d, _sort:new Date(d.iso+"T00:00:00")}));
-    return [...annualPart, ...dailyPart].sort((a,b) => a._sort - b._sort);
+    return [...annualPart, ...monthlyPart, ...dailyPart].sort((a,b) => a._sort - b._sort);
 }
 
 // ── Open modal — always resets to 1W daily view ──────────────────
@@ -1074,7 +1123,7 @@ function renderModalTable() {
     const isGold = modalType === "gold";
     const data   = modalDailySlice(modalType, modalRange);
     const labels = isGold
-        ? { "10y":"10 Years (Annual for older years + Daily where real data exists)", "1y":"1 Year (Daily — real coverage may be partial)", "1m":"1 Month (Daily)", "1w":"1 Week (Daily)" }
+        ? { "10y":"10 Years (Monthly for older years + Daily since 2025)", "1y":"1 Year (Daily — real coverage may be partial)", "1m":"1 Month (Daily)", "1w":"1 Week (Daily)" }
         : { "10y":"10 Years (Daily)", "1y":"1 Year (Daily)", "1m":"1 Month (Daily)", "1w":"1 Week (Daily)" };
 
     document.getElementById("modal-title").textContent    = isGold ? "Gold Price — Full History" : "USD/MMK Rate — Full History";
