@@ -1,37 +1,40 @@
+# Path in repo: .github/workflows/update_usd.yml
+#
+# Runs update_usd_rate.py once a day, BEFORE collect.yml (gold), so that
+# gold_data_collector.py can read a fresh real USD/MMK rate from
+# usd_history.csv the same day. Commits usd_history.csv if it changed.
 
-name: Daily Gold Data Collection
+name: Update USD/MMK black market rate
+
 on:
   schedule:
-    - cron: "30 2 * * *"
-  workflow_dispatch: {}
+    - cron: "0 2 * * *"      # 30 min before collect.yml's "30 2 * * *"
+  workflow_dispatch: {}       # lets you trigger it manually from the Actions tab
+
 permissions:
   contents: write
+
 jobs:
-  collect:
+  update-usd-rate:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
-      - name: Install forecast dependencies
-        run: pip install pandas statsmodels scikit-learn
-      - name: Run data collector
-        run: python gold_data_collector.py
-      - name: Run SARIMA forecast model
-        run: python train_forecast_model.py
-        continue-on-error: true
-      - name: Run scikit-learn forecast + backtest comparison
-        run: python train_forecast_sklearn.py
-        continue-on-error: true
-      - name: Commit and push updated data
+          python-version: "3.11"
+
+      - name: Fetch today's real black-market rate
+        run: python update_usd_rate.py --csv usd_history.csv
+
+      - name: Commit if changed
         run: |
-          git config user.name "gold-data-bot"
-          git config user.email "bot@users.noreply.github.com"
-          git add gold_history.csv || true
-          git add forecast.json || true
-          git add forecast_sklearn.json || true
-          git diff --staged --quiet && echo "No changes to commit" || git commit -m "Daily gold data + forecast update ($(date -u +%Y-%m-%d))"
-          git push
+          git config user.name "usd-rate-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if ! git diff --quiet usd_history.csv; then
+            git add usd_history.csv
+            git commit -m "Update USD/MMK black market rate $(date -u +%F)"
+            git push
+          else
+            echo "No change to usd_history.csv"
+          fi
