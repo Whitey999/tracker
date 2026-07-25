@@ -22,7 +22,7 @@ jobs:
           python-version: "3.11"
 
       - name: Fetch today's real black-market rate
-        run: python pipeline/update_usd_rate.py --csv usd_history.csv
+        run: python update_usd_rate.py --csv usd_history.csv
 
       - name: Commit if changed
         run: |
