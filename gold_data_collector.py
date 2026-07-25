@@ -1,19 +1,31 @@
 #!/usr/bin/env python3
 """
-gold_data_collector.py — Daily Gold + USD/MMK data collector.
+gold_data_collector.py — Daily Gold data collector.
 
 Purpose
 -------
 Builds up a real, first-party historical dataset (one row per day) so that
 a forecasting model (ARIMA/SARIMA or ML/DL with scikit-learn) has enough
-real data to train on later. Solves the earlier problem of relying on
-third-party feeds (freegoldapi.com, etc.) that can silently go stale.
+real data to train on later.
+
+CHANGED: this script used to also fetch USD/MMK itself (Myanmar FX API,
+falling back to the official CBM rate). That caused two problems:
+  1. The Myanmar FX API died on 2024-06-21 and has returned the same
+     frozen "4480" value ever since, silently, every single day.
+  2. On days that primary fetch failed for other reasons, it silently
+     fell back to the CBM OFFICIAL rate (~2,100) -- a completely
+     different, much lower number -- corrupting gold_mmk_per_tical for
+     that day (see 2026-07-13 and 2026-07-15 in the existing CSV: rate
+     drops to 2098 and gold_mmk_per_tical is roughly HALF the neighboring
+     days).
+USD/MMK now has its own dedicated real-data pipeline (usd_history.csv,
+built by backfill_usd_history.py + update_usd_rate.py). This script just
+reads the latest REAL rate from that file instead of fetching its own.
 
 Data sources (all free, no API key required)
 ---------------------------------------------
 - Gold spot price (USD per troy ounce): https://api.gold-api.com/price/XAU
-- USD/MMK rate, primary:  Myanmar Currency API (community, parallel market)
-- USD/MMK rate, fallback: Central Bank of Myanmar official rate
+- USD/MMK rate: read from usd_history.csv (this repo's own real pipeline)
 
 Output
 ------
@@ -22,14 +34,23 @@ same directory as this script:
 
     date, gold_usd_per_oz, usd_mmk_rate, gold_mmk_per_tical
 
+If usd_history.csv has no real rate available yet for today (e.g. the
+USD workflow hasn't run yet, or usd_history.csv doesn't exist), this
+script uses the most recent real rate it DOES have on file rather than
+fabricating one, and clearly labels the row as using a carried-over
+rate. If there is no real USD rate at all yet, it leaves usd_mmk_rate
+and gold_mmk_per_tical blank rather than guessing.
+
+IMPORTANT — run order: this script should run AFTER update_usd_rate.py
+each day (see the workflow schedule) so it can pick up that day's fresh
+rate instead of yesterday's.
+
 Usage
 -----
     python3 gold_data_collector.py
 
-Run this once a day (see scheduling notes at the bottom of this file for
-cron / Task Scheduler / GitHub Actions examples). Running it more than
-once on the same day is safe — it detects today's row already exists and
-skips instead of writing a duplicate.
+Running it more than once on the same day is safe — it detects today's
+row already exists and skips instead of writing a duplicate.
 """
 
 import csv
@@ -41,10 +62,10 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError
 
 GOLD_API = "https://api.gold-api.com/price/XAU"
-MYANMAR_FX_API = "https://myanmar-currency-api.github.io/api/latest.json"
-CBM_API = "https://forex.cbm.gov.mm/api/latest"
 
-CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gold_history.csv")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_PATH = os.path.join(SCRIPT_DIR, "gold_history.csv")
+USD_CSV_PATH = os.path.join(SCRIPT_DIR, "usd_history.csv")
 
 # 1 tical = 16.3293 grams; 1 troy ounce = 31.1035 grams
 TICAL_TO_OZ = 16.3293 / 31.1035
@@ -64,66 +85,22 @@ def get_gold_usd_price():
     return float(price)
 
 
-# Myanmar has TWO real, legitimate USD/MMK rates that coexist:
-#   - Official/CBM reference rate: ~2,000-2,200
-#   - Black market / street rate (what gold shops & money changers
-#     actually use): historically ~3,400-4,800+, confirmed accurate by
-#     on-the-ground verification with a money changer.
-# A rate outside this WIDE range is almost certainly a real data error
-# (e.g. an API returning garbage, a decimal-point glitch, or a totally
-# wrong field) — but anything within it is plausible and should NOT be
-# rejected just for looking different from a single fixed number.
-RATE_PLAUSIBLE_MIN = 1500
-RATE_PLAUSIBLE_MAX = 8000
-
-
-def get_usd_mmk_rate(previous_rate=None):
-    """Tries sources in order (Myanmar FX black-market rate first, since
-    that's what this app is meant to track; CBM official rate as
-    fallback only). Only rejects a rate if it's outside the wide
-    plausible range for ANY real Myanmar USD/MMK rate — narrow
-    "vs yesterday" or "vs a fixed 2100 reference" checks were tried
-    before and incorrectly rejected genuine black-market values."""
-    suspicious = []
-
-    def is_ok(rate):
-        if not (RATE_PLAUSIBLE_MIN <= rate <= RATE_PLAUSIBLE_MAX):
-            suspicious.append(rate)
-            print(f"  Rejected implausible rate {rate} (outside "
-                  f"{RATE_PLAUSIBLE_MIN}-{RATE_PLAUSIBLE_MAX} range)",
-                  file=sys.stderr)
-            return False
-        return True
-
-    # Primary: Myanmar Currency API (community-run parallel/black market rate —
-    # this is the rate this app is meant to track, matching what gold
-    # shops and money changers actually use)
-    try:
-        data = fetch_json(MYANMAR_FX_API)
-        for entry in data.get("data", []):
-            if entry.get("currency") == "USD":
-                buy = float(entry["buy"])
-                if is_ok(buy):
-                    return buy
-    except (URLError, ValueError, KeyError, TimeoutError) as e:
-        print(f"Myanmar FX API failed: {e}", file=sys.stderr)
-
-    # Fallback: Central Bank of Myanmar official rate (only used if the
-    # black-market source above is unreachable)
-    try:
-        data = fetch_json(CBM_API)
-        rate = float(data["rates"]["USD"])
-        if is_ok(rate):
-            return rate
-    except (URLError, ValueError, KeyError, TimeoutError) as e:
-        print(f"CBM API failed: {e}", file=sys.stderr)
-
-    if suspicious:
-        raise RuntimeError(
-            f"All sources returned implausible rates: {suspicious}. "
-            f"Refusing to write a possibly-bad value — check the APIs manually."
-        )
-    raise RuntimeError("Could not fetch USD/MMK rate from any source today")
+def get_latest_real_usd_rate(today_str):
+    """Reads usd_history.csv (this repo's real USD/MMK pipeline) and
+    returns (rate, is_todays_rate). Never fetches anything itself --
+    if the file is missing or empty, returns (None, False) rather than
+    guessing a number."""
+    if not os.path.exists(USD_CSV_PATH):
+        print(f"  usd_history.csv not found at {USD_CSV_PATH}", file=sys.stderr)
+        return None, False
+    with open(USD_CSV_PATH, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        return None, False
+    rows.sort(key=lambda r: r["date"])
+    last = rows[-1]
+    rate = float(last["usd_mmk_buy"])
+    return rate, (last["date"] == today_str)
 
 
 def load_existing_rows(path):
@@ -131,16 +108,6 @@ def load_existing_rows(path):
         return []
     with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
-
-
-def _parse_any_date(s):
-    s = (s or "").strip()
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    return None
 
 
 def append_row(path, row, fieldnames):
@@ -164,19 +131,33 @@ def main():
 
     try:
         gold_usd = get_gold_usd_price()
-        usd_mmk = get_usd_mmk_rate()
     except Exception as e:
-        print(f"[{today}] FAILED to fetch data: {e}", file=sys.stderr)
+        print(f"[{today}] FAILED to fetch gold price: {e}", file=sys.stderr)
         sys.exit(1)
 
-    gold_mmk_per_tical = round(gold_usd * TICAL_TO_OZ * usd_mmk / 1000) * 1000
+    usd_mmk, is_fresh = get_latest_real_usd_rate(today)
 
-    row = {
-        "date": today,
-        "gold_usd_per_oz": round(gold_usd, 2),
-        "usd_mmk_rate": round(usd_mmk, 2),
-        "gold_mmk_per_tical": gold_mmk_per_tical,
-    }
+    if usd_mmk is None:
+        print(f"[{today}] No real USD/MMK rate available yet in usd_history.csv "
+              f"-- writing gold_usd_per_oz only, leaving MMK fields blank.")
+        row = {
+            "date": today,
+            "gold_usd_per_oz": round(gold_usd, 2),
+            "usd_mmk_rate": "",
+            "gold_mmk_per_tical": "",
+        }
+    else:
+        if not is_fresh:
+            print(f"[{today}] usd_history.csv doesn't have today's rate yet -- "
+                  f"using its most recent real rate ({usd_mmk}) instead of guessing.")
+        gold_mmk_per_tical = round(gold_usd * TICAL_TO_OZ * usd_mmk / 1000) * 1000
+        row = {
+            "date": today,
+            "gold_usd_per_oz": round(gold_usd, 2),
+            "usd_mmk_rate": round(usd_mmk, 2),
+            "gold_mmk_per_tical": gold_mmk_per_tical,
+        }
+
     append_row(CSV_PATH, row, fieldnames)
     print(f"[{today}] Saved: {row}")
 
@@ -186,46 +167,19 @@ if __name__ == "__main__":
 
 
 # ======================================================================
-# SCHEDULING NOTES (pick whichever matches where you'll run this)
+# SCHEDULING NOTES
 # ======================================================================
+# This script must run AFTER update_usd_rate.py in the same daily cycle
+# so it picks up that day's fresh real USD/MMK rate. See update_usd.yml
+# (cron "0 2 * * *") and collect.yml (cron "30 2 * * *") -- USD update
+# runs 30 minutes before gold collection.
 #
-# --- Option A: Your own computer (Linux/Mac) — cron ---
-#   crontab -e
-#   Add a line to run it every day at 9:00 AM:
-#     0 9 * * * /usr/bin/python3 /full/path/to/gold_data_collector.py
+# --- GitHub Actions (current setup) ---
+#   .github/workflows/update_usd.yml  -> runs update_usd_rate.py first
+#   .github/workflows/collect.yml     -> runs this script + forecast models
 #
-# --- Option B: Windows — Task Scheduler ---
-#   Create a Basic Task that runs daily, Action = "Start a program":
-#     Program:  python
-#     Arguments: gold_data_collector.py
-#     Start in: (folder containing this script)
-#
-# --- Option C: GitHub Actions (no server needed, like freegoldapi.com does) ---
-#   Create .github/workflows/collect.yml in your repo:
-#
-#     name: Daily Gold Data Collection
-#     on:
-#       schedule:
-#         - cron: "30 2 * * *"   # 09:00 Myanmar time (UTC+6:30) daily
-#       workflow_dispatch: {}     # lets you also trigger it manually
-#     jobs:
-#       collect:
-#         runs-on: ubuntu-latest
-#         steps:
-#           - uses: actions/checkout@v4
-#           - uses: actions/setup-python@v5
-#             with:
-#               python-version: "3.x"
-#           - run: python gold_data_collector.py
-#           - run: |
-#               git config user.name "gold-bot"
-#               git config user.email "bot@users.noreply.github.com"
-#               git add gold_history.csv
-#               git commit -m "Daily gold data update" || echo "No changes"
-#               git push
-#
-#   This commits gold_history.csv back into your repo every day — over
-#   time it becomes your own real, first-party historical dataset that
-#   your forecasting model (and even the website itself) can read from,
-#   with no dependency on any third-party API's uptime.
+#   Both commit back to the repo, so as long as update_usd.yml's run
+#   finishes and pushes before collect.yml starts, gold_data_collector.py
+#   will see the fresh rate via actions/checkout@v4 at the start of its
+#   own job.
 # ======================================================================
