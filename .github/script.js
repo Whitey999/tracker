@@ -169,11 +169,14 @@ async function loadRealGoldHistory() {
         goldRealDailyRaw = (raw || [])
             .filter(d => d.price && new Date(d.date + "T00:00:00") >= cutoff)
             .sort((a,b) => new Date(a.date) - new Date(b.date));
-        const extStart = new Date(); extStart.setFullYear(extStart.getFullYear() - 15);
+        // Fixed start of 2007-01-01, not "15 years ago" — freegoldapi.com's
+        // World Bank monthly source has real data back to the 1960s, so a
+        // relative cutoff was needlessly excluding real 2007-2010 records.
+        const extStart = new Date("2007-01-01T00:00:00");
         goldRealExtendedRaw = (raw || [])
             .filter(d => d.price && new Date(d.date + "T00:00:00") >= extStart)
             .sort((a,b) => new Date(a.date) - new Date(b.date));
-        dbg(`freegoldapi.com: fetched ${raw?.length||0} total, ${goldRealDailyRaw.length} within last 400 days, ${goldRealExtendedRaw.length} within last 15 years. Latest: ${goldRealDailyRaw[goldRealDailyRaw.length-1]?.date || "none"}`);
+        dbg(`freegoldapi.com: fetched ${raw?.length||0} total, ${goldRealDailyRaw.length} within last 400 days, ${goldRealExtendedRaw.length} since 2007. Latest: ${goldRealDailyRaw[goldRealDailyRaw.length-1]?.date || "none"}`);
     } catch (e) {
         dbg(`freegoldapi.com: FETCH FAILED — ${e.message||e}`);
         goldRealDailyRaw = [];
@@ -310,13 +313,17 @@ async function loadUsdData() {
         lines.forEach(line => {
             const [dateStr, buyStr, sellStr] = line.split(",");
             const buy = parseFloat(buyStr), sell = parseFloat(sellStr ?? buyStr);
-            if (!dateStr || !isRateSane(buy)) return; // skip malformed/implausible rows, never invent one
-            const d = new Date(dateStr + "T00:00:00");
+            const d = parseFlexibleDate(dateStr);
+            if (!d || !isRateSane(buy)) return; // skip malformed/implausible rows, never invent one
+            const iso = localIso(d);
             const label = d.toLocaleDateString("en-US", {month:"short", day:"numeric", year:"numeric"});
             const change = prev ? ((buy - prev) / prev * 100) : 0;
-            usdDailyHistory.push({year: d.getFullYear(), date: label, iso: dateStr, rate: buy, sell, change});
+            usdDailyHistory.push({year: d.getFullYear(), date: label, iso, rate: buy, sell, change});
             prev = buy;
         });
+        // Rows in the CSV should already be date-ascending, but re-sort
+        // defensively in case a manual edit left them out of order.
+        usdDailyHistory.sort((a,b) => a.iso < b.iso ? -1 : a.iso > b.iso ? 1 : 0);
     } catch (e) {
         console.warn("USD history CSV:", e);
         dbg(`USD history: FAILED to load ${USD_HISTORY_CSV_URL} — ${e.message||e}. No fabricated fallback used.`);
@@ -326,6 +333,21 @@ async function loadUsdData() {
     liveUsdSell = last ? last.sell : 0;
     dbg(`USD history: ${usdDailyHistory.length} real record(s) loaded from usd_history.csv.${last?` Latest: ${last.iso} = ${last.rate}`:""}`);
     return liveUsdRate;
+}
+
+// Accepts "YYYY-MM-DD" (what the pipeline scripts write) or "M/D/YYYY" /
+// "MM/DD/YYYY" (what Excel/manual edits tend to produce) so a manual CSV
+// edit in either style doesn't break into "Invalid Date". Anything else
+// falls back to the native Date parser; unparseable rows return null and
+// are skipped by the caller rather than shown broken.
+function parseFlexibleDate(str) {
+    str = (str || "").trim();
+    let m = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (m) return new Date(+m[1], +m[2]-1, +m[3]);
+    m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (m) return new Date(+m[3], +m[1]-1, +m[2]);
+    const d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
 }
 
 function todayLabel(){return new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});}
@@ -467,13 +489,13 @@ function lastNCalendarDays(history, days){
 
 // ── Data slices per range ────────────────────────────────────────
 function goldSlice(range){
-    if(range==="1w") return goldDailyHistory.slice(-7);
+    if(range==="1w") return lastNCalendarDays(goldDailyHistory, 7);
     if(range==="1m") return lastNCalendarDays(goldDailyHistory, 30);
     if(range==="1y") return goldDailyHistory.slice(-261); // whatever real daily coverage actually exists (up to ~1 trading year)
     return goldHistory; // 10Y: real annual averages, derived from actual fetched data (range varies with source coverage)
 }
 function usdSlice(range){
-    if(range==="1w") return usdDailyHistory.slice(-7);
+    if(range==="1w") return lastNCalendarDays(usdDailyHistory, 7);
     if(range==="1m") return lastNCalendarDays(usdDailyHistory, 30);
     if(range==="1y") return usdDailyHistory.length>=12?usdDailyHistory:usdHistory.slice(-12);
     return usdHistory;
@@ -949,7 +971,7 @@ function usdDailyMerged(daysBack) {
 // 10Y → full ~2600 days (from the long daily history)
 function modalDailySlice(type, range) {
     const isGold = type === "gold";
-    if (range === "1w") return (isGold ? goldDailyHistory : usdDailyHistory).slice(-7);
+    if (range === "1w") return isGold ? goldSlice("1w") : usdSlice("1w");
     if (range === "1m") {
         if (!isGold) return usdSlice("1m");
         return goldSlice("1m"); // reuse the same trailing-30-day logic as the chart
