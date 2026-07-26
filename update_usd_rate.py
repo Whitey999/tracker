@@ -75,20 +75,20 @@ def html_to_text(html):
 
 def parse_rates(text):
     """Returns (buy, sell) or None."""
-    sell_m = re.search(r"Sell Price:\s*\n?\s*([\d,]+\.?\d*)", text)
+    sell_m = re.search(r"Sell Price:\s*([\d,]+(?:\.\d+)?)", text)
     if not sell_m:
         return None
     sell = float(sell_m.group(1).replace(",", ""))
 
-    # The buy/market rate is the number immediately preceding "Sell Price:".
-    pre_text = text[: sell_m.start()]
-    buy_m = re.findall(r"([\d,]+\.\d+)\s*$", pre_text.strip())
-    if not buy_m:
-        # fallback: any plausible number in the 500 chars before "Sell Price:"
-        buy_m = re.findall(r"([\d,]+\.\d+)", pre_text[-500:])
+    # The buy/market rate is the number immediately preceding "Sell Price:"
+    # (real data shows this as a whole number like "4,485" -- no decimal --
+    # so the decimal part here must be optional, unlike the sell price
+    # which does have one, e.g. "4,440.15").
+    pre_text = text[: sell_m.start()].rstrip()
+    buy_m = re.search(r"([\d,]+(?:\.\d+)?)\s*$", pre_text)
     if not buy_m:
         return None
-    buy = float(buy_m[-1].replace(",", ""))
+    buy = float(buy_m.group(1).replace(",", ""))
 
     if not (RATE_MIN <= buy <= RATE_MAX and RATE_MIN <= sell <= RATE_MAX):
         return None
