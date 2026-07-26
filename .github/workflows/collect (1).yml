@@ -1,0 +1,45 @@
+# Path in repo: .github/workflows/collect.yml
+#
+# No changes needed to the steps themselves — gold_data_collector.py is
+# still invoked the same way. The only thing that matters now: this
+# workflow must run AFTER update_usd.yml each day (cron "0 2 * * *")
+# so gold_data_collector.py can read a fresh rate from usd_history.csv.
+# That's already handled by this workflow's "30 2 * * *" schedule being
+# 30 minutes later.
+
+name: Daily Gold Data Collection
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch: {}
+permissions:
+  contents: write
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install forecast dependencies
+        run: pip install pandas statsmodels scikit-learn
+      - name: Run data collector
+        run: python gold_data_collector.py
+      - name: Run SARIMA forecast model
+        run: python train_forecast_model.py
+        continue-on-error: true
+      - name: Run scikit-learn forecast + backtest comparison
+        run: python train_forecast_sklearn.py
+        continue-on-error: true
+      - name: Commit and push updated data
+        run: |
+          git config user.name "gold-data-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add gold_history.csv || true
+          git add forecast.json || true
+          git add forecast_sklearn.json || true
+          git diff --staged --quiet && echo "No changes to commit" || git commit -m "Daily gold data + forecast update ($(date -u +%Y-%m-%d))"
+          git push
