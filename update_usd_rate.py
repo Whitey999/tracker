@@ -126,11 +126,15 @@ def main():
         print("", file=sys.stderr)
         print(f"--- DEBUG: response length = {len(html)} chars ---", file=sys.stderr)
         print(f"--- DEBUG: contains 'Sell Price' = {'Sell Price' in html} ---", file=sys.stderr)
-        print(f"--- DEBUG: contains 'cloudflare'/'captcha'/'blocked' (case-insens) = "
-              f"{any(k in html.lower() for k in ['cloudflare','captcha','are you human','access denied','blocked'])} ---",
-              file=sys.stderr)
-        print("--- DEBUG: first 800 chars of response ---", file=sys.stderr)
-        print(html[:800], file=sys.stderr)
+        idx = text.find("Sell Price")
+        if idx != -1:
+            start = max(0, idx - 400)
+            end = min(len(text), idx + 200)
+            print("--- DEBUG: extracted TEXT around 'Sell Price' (what parse_rates() sees) ---", file=sys.stderr)
+            print(repr(text[start:end]), file=sys.stderr)
+        else:
+            print("--- DEBUG: 'Sell Price' not found in extracted text (only in raw HTML,", file=sys.stderr)
+            print("    likely inside an attribute/script rather than visible page text) ---", file=sys.stderr)
         print("--- END DEBUG ---", file=sys.stderr)
         sys.exit(1)
 
