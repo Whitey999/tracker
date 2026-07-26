@@ -41,9 +41,11 @@ import urllib.request
 URL = "https://egcurrency.com/en/currency/USD-to-MMK/blackMarket"
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (compatible; GoldCurrencyTrackerBot/1.0; "
-        "+https://github.com/Whitey999/tracker) usd-rate-daily-update"
-    )
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 # Sanity bounds: the black market rate should be well above the ~2,100
@@ -121,6 +123,15 @@ def main():
         print("FAILED to parse a plausible rate from the page.", file=sys.stderr)
         print("The page layout may have changed -- inspect the HTML and", file=sys.stderr)
         print("update parse_rates() accordingly. No fallback number was used.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print(f"--- DEBUG: response length = {len(html)} chars ---", file=sys.stderr)
+        print(f"--- DEBUG: contains 'Sell Price' = {'Sell Price' in html} ---", file=sys.stderr)
+        print(f"--- DEBUG: contains 'cloudflare'/'captcha'/'blocked' (case-insens) = "
+              f"{any(k in html.lower() for k in ['cloudflare','captcha','are you human','access denied','blocked'])} ---",
+              file=sys.stderr)
+        print("--- DEBUG: first 800 chars of response ---", file=sys.stderr)
+        print(html[:800], file=sys.stderr)
+        print("--- END DEBUG ---", file=sys.stderr)
         sys.exit(1)
 
     buy, sell = result
