@@ -95,12 +95,31 @@ def parse_rates(text):
     return buy, sell
 
 
+def parse_any_date(s):
+    s = (s or "").strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            return datetime.datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 def load_existing(path):
+    """Reads existing rows, keyed by NORMALIZED ISO date (not the raw
+    string) so "6/21/2024" and "2024-06-21" are recognized as the same
+    date instead of creating a duplicate entry. Rows with an unparseable
+    date are dropped (reported, not silently kept) rather than risk
+    corrupting the sort."""
     rows = {}
     if os.path.exists(path):
         with open(path, newline="") as f:
             for r in csv.DictReader(f):
-                rows[r["date"]] = r
+                d = parse_any_date(r.get("date"))
+                if d is None:
+                    print(f"  WARNING: dropping row with unparseable date {r.get('date')!r}", file=sys.stderr)
+                    continue
+                rows[d.isoformat()] = r
     return rows
 
 
@@ -153,9 +172,9 @@ def main():
     with open(args.csv, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["date", "usd_mmk_buy", "usd_mmk_sell", "source"])
-        for date_str in sorted(rows):
-            r = rows[date_str]
-            w.writerow([r["date"], r["usd_mmk_buy"], r["usd_mmk_sell"], r["source"]])
+        for iso_date in sorted(rows):  # rows is keyed by ISO date, so this is now genuinely chronological
+            r = rows[iso_date]
+            w.writerow([iso_date, r["usd_mmk_buy"], r["usd_mmk_sell"], r["source"]])
 
     print(f"Wrote {len(rows)} total rows to {args.csv}")
 
