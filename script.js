@@ -1,7 +1,8 @@
 // ================================================================
 //  GOLD & CURRENCY TRACKER — Myanmar Edition
 //  ALL ranges → Line Chart only
-//  10Y → annual data + dashed forecast overlay
+//  20Y → annual data (last 20 real years) + dashed forecast overlay
+//  10Y → annual data (last 10 real years) + dashed forecast overlay
 //  1Y  → monthly data
 //  1M  → daily data (~22 trading days)
 //  1W  → daily data (last 7 trading days)
@@ -12,10 +13,6 @@ const FREE_GOLD_HISTORY_API= "https://freegoldapi.com/data/latest.json"; // real
 // Real 7-day gold forecast, trained by train_forecast_model.py (SARIMA) and
 // committed daily by GitHub Actions after the data collector runs.
 const ML_FORECAST_URL       = "https://raw.githubusercontent.com/Whitey999/tracker/main/forecast.json";
-// Real USD/MMK black-market history, backfilled from myanmar-currency-api's
-// commit history by usd_backfill.py and kept up to date by the daily
-// GitHub Actions workflow (daily_usd_update.yml). Columns: date,iso,buy,sell,change
-const USD_HISTORY_CSV_URL   = "https://raw.githubusercontent.com/Whitey999/tracker/main/usd_history.csv";
 // ⚠️ SECURITY NOTE: this key lives in client-side JS, so it is visible to
 // anyone who opens browser DevTools / View Source on this page. GoldAPI.io's
 // free tier is quota-limited (~100 requests/month). Before deploying this
@@ -24,10 +21,8 @@ const USD_HISTORY_CSV_URL   = "https://raw.githubusercontent.com/Whitey999/track
 // from the browser. Used sparingly below (only to backfill recent gap days).
 const GOLDAPI_IO_KEY       = "goldapi-80052cf5b856a93ccffcc0336ee9b5ba-io";
 const GOLDAPI_IO_BASE      = "https://www.goldapi.io/api/XAU/USD";
-const MYANMAR_FX_API       = "https://myanmar-currency-api.github.io/api/latest.json";
-const CBM_API              = "https://forex.cbm.gov.mm/api/latest";
-const CBM_HISTORY_API      = "https://forex.cbm.gov.mm/api/history"; // + /DD-MM-YYYY — official Myanmar central bank, real, no key needed
-const CURRENCY_API         = "https://api.frankfurter.dev/v2/rates"; // latest rates (no date = current)
+const USD_HISTORY_CSV_URL  = "https://raw.githubusercontent.com/Whitey999/tracker/main/usd_history.csv"; // real black-market history, built by pipeline/ scripts — see pipeline/README.md
+const CURRENCY_API         = "https://api.frankfurter.dev/v2/rates"; // official mid-market rates — used ONLY by the currency converter for non-MMK pairs, never for USD/MMK display
 const CURRENCY_HISTORY_API = "https://api.frankfurter.dev/v2";        // + /rates?from=&to= for date ranges
 
 const TICAL_TO_OZ = 16.3293 / 31.1035;
@@ -70,7 +65,6 @@ let liveGoldPrice      = 0;
 let liveUsdRate        = 0;
 let liveUsdSell        = 0;
 let goldUsdPerOz       = 0;
-let myanmarFxData      = [];
 let goldRealDailyRaw   = []; // real {date, price(USD/oz)} records from freegoldapi.com
 let usingRealGoldDaily = false;
 
@@ -91,15 +85,12 @@ async function loadAllData() {
     document.getElementById("gold-price").innerHTML = "Loading...";
     document.getElementById("usd-rate").innerHTML   = "Loading...";
 
-    await loadUsdRate();              // MUST run first — liveUsdRate needed for USD history
-    await loadUsdHistory();           // records only the real live rate — no fabricated days
-    // NOTE: CBM (forex.cbm.gov.mm) historical endpoint blocks direct browser
-    // requests (CORS) — confirmed via live testing ("Failed to fetch"). It
-    // cannot be called from client-side JS at all without a server-side
-    // proxy, so the per-day backfill call has been removed rather than
-    // waste ~40 failed requests (and several seconds) on every page load.
-    // loadRecentUsdFromCbm(40) is left defined below in case a future
-    // backend proxy makes it usable again.
+    await loadUsdData();               // real black-market history + live rate, both from usd_history.csv
+    // usd_history.csv is built server-side by pipeline/backfill_usd_history.py
+    // (one-time) and pipeline/update_usd_rate.py (daily, via GitHub Actions —
+    // see pipeline/README.md), then committed to the repo. Fetching it here
+    // is a single static-file request: no client-side API calls, no CORS
+    // risk, no dead third-party endpoints.
     await Promise.all([loadGoldPrice(), loadRealGoldHistory()]);
     buildRealGoldDailyHistory(); // real freegoldapi.com data — no simulated/estimated fallback
     buildGoldMonthlyReal();      // real freegoldapi.com monthly data (World Bank) for older years
@@ -179,11 +170,14 @@ async function loadRealGoldHistory() {
         goldRealDailyRaw = (raw || [])
             .filter(d => d.price && new Date(d.date + "T00:00:00") >= cutoff)
             .sort((a,b) => new Date(a.date) - new Date(b.date));
-        const extStart = new Date(); extStart.setFullYear(extStart.getFullYear() - 15);
+        // Fixed start of 2007-01-01, not "15 years ago" — freegoldapi.com's
+        // World Bank monthly source has real data back to the 1960s, so a
+        // relative cutoff was needlessly excluding real 2007-2010 records.
+        const extStart = new Date("2007-01-01T00:00:00");
         goldRealExtendedRaw = (raw || [])
             .filter(d => d.price && new Date(d.date + "T00:00:00") >= extStart)
             .sort((a,b) => new Date(a.date) - new Date(b.date));
-        dbg(`freegoldapi.com: fetched ${raw?.length||0} total, ${goldRealDailyRaw.length} within last 400 days, ${goldRealExtendedRaw.length} within last 15 years. Latest: ${goldRealDailyRaw[goldRealDailyRaw.length-1]?.date || "none"}`);
+        dbg(`freegoldapi.com: fetched ${raw?.length||0} total, ${goldRealDailyRaw.length} within last 400 days, ${goldRealExtendedRaw.length} since 2007. Latest: ${goldRealDailyRaw[goldRealDailyRaw.length-1]?.date || "none"}`);
     } catch (e) {
         dbg(`freegoldapi.com: FETCH FAILED — ${e.message||e}`);
         goldRealDailyRaw = [];
@@ -294,40 +288,81 @@ async function loadGoldPrice() {
 // is a parallel-market source), so the sanity check only rejects
 // clearly-broken values (e.g. 0, negative, or wildly implausible),
 // not anything that looks "different from the official rate."
-const RATE_PLAUSIBLE_MIN = 3000;  // reject CBM official rate (~2100); only accept black market rate (3000+)
-const RATE_PLAUSIBLE_MAX = 8000;
+// clearly-broken values (e.g. 0, negative, or wildly implausible),
+// not anything that looks "different from the official rate."
+//
+// Myanmar's real USD/MMK rate has climbed gradually and unevenly across
+// 2007-2026 (roughly 800-1400 in 2007-2017, ~1300-1900 in 2018-2021,
+// 1800-3300 in 2022-2023, 3300-4800+ from 2024 onward) -- there's no
+// clean year boundary to split "official" from "black market" by
+// magnitude alone. A two-bucket year split tried this and created a
+// gap that rejected genuinely real 2018-2021 rows. Since every row
+// entering usd_history.csv now comes from a named, verified real
+// source (World Bank, myanmar-currency-api archive, egcurrency.com),
+// this check only needs to catch clearly-broken parses (0, negative,
+// a decimal-point slip, a wrong-field shift) -- not gatekeep "black
+// market vs official" by a magnitude threshold.
+const RATE_PLAUSIBLE_MIN = 500;
+const RATE_PLAUSIBLE_MAX = 10000;
 
 function isRateSane(rate){
     return rate >= RATE_PLAUSIBLE_MIN && rate <= RATE_PLAUSIBLE_MAX;
 }
 
-async function loadUsdRate() {
-    const rejected = [];
-    try{
-        const r=await fetch(MYANMAR_FX_API),d=await r.json();
-        myanmarFxData=d.data||[];
-        const u=myanmarFxData.find(c=>c.currency==="USD");
-        if(u){
-            const buy=parseFloat(u.buy),sell=parseFloat(u.sell);
-            if(isRateSane(buy)){liveUsdRate=buy;liveUsdSell=sell;return liveUsdRate;}
-            if(buy>100) rejected.push(`Myanmar FX: ${buy}`);
-        }
-    }catch(e){console.warn("Myanmar FX:",e);}
-    try{
-        const r=await fetch(CBM_API),d=await r.json(),rate=parseFloat(d.rates?.USD);
-        if(isRateSane(rate)){liveUsdRate=rate;liveUsdSell=rate;return liveUsdRate;}
-        if(rate>100) rejected.push(`CBM: ${rate}`);
-    }catch(e){console.warn("CBM:",e);}
-    try{
-        const r=await fetch(CURRENCY_API+"?base=USD&quotes=MMK"),d=await r.json();
-        const rate=Array.isArray(d)?d[d.length-1]?.rate:(d.rate??d.rates?.MMK);
-        if(isRateSane(rate)){liveUsdRate=rate;liveUsdSell=rate;return liveUsdRate;}
-        if(rate>100) rejected.push(`Frankfurter: ${rate}`);
-    }catch(e){console.warn("Frankfurter:",e);}
+// ================================================================
+//  USD/MMK — real black-market data, loaded from usd_history.csv
+//  (built server-side by pipeline/backfill_usd_history.py +
+//  pipeline/update_usd_rate.py, run via GitHub Actions — see
+//  pipeline/README.md). This replaces per-visit client-side API calls
+//  entirely: no CORS risk, no dead APIs, no rate-limit exposure. The
+//  CSV's last row IS today's live rate (updated once/day by the Action).
+// ================================================================
+async function loadUsdData() {
+    usdDailyHistory = [];
+    try {
+        const res = await fetch(USD_HISTORY_CSV_URL + `?t=${Date.now()}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        const lines = text.trim().split("\n").slice(1); // drop header row
+        let prev = null;
+        lines.forEach(line => {
+            const [dateStr, buyStr, sellStr] = line.split(",");
+            const buy = parseFloat(buyStr), sell = parseFloat(sellStr ?? buyStr);
+            const d = parseFlexibleDate(dateStr);
+            if (!d || !isRateSane(buy)) return; // skip malformed/implausible rows, never invent one
+            const iso = localIso(d);
+            const label = d.toLocaleDateString("en-US", {month:"short", day:"numeric", year:"numeric"});
+            const change = prev ? ((buy - prev) / prev * 100) : 0;
+            usdDailyHistory.push({year: d.getFullYear(), date: label, iso, rate: buy, sell, change});
+            prev = buy;
+        });
+        // Rows in the CSV should already be date-ascending, but re-sort
+        // defensively in case a manual edit left them out of order.
+        usdDailyHistory.sort((a,b) => a.iso < b.iso ? -1 : a.iso > b.iso ? 1 : 0);
+    } catch (e) {
+        console.warn("USD history CSV:", e);
+        dbg(`USD history: FAILED to load ${USD_HISTORY_CSV_URL} — ${e.message||e}. No fabricated fallback used.`);
+    }
+    const last = usdDailyHistory[usdDailyHistory.length - 1];
+    liveUsdRate = last ? last.rate : 0;
+    liveUsdSell = last ? last.sell : 0;
+    dbg(`USD history: ${usdDailyHistory.length} real record(s) loaded from usd_history.csv.${last?` Latest: ${last.iso} = ${last.rate}`:""}`);
+    return liveUsdRate;
+}
 
-    if(rejected.length) console.warn(`All USD/MMK sources looked implausible (outside ${RATE_PLAUSIBLE_MIN}-${RATE_PLAUSIBLE_MAX}): ${rejected.join(", ")}.`);
-    dbg(`USD rate: no live source available.${liveUsdRate>0?` Keeping last known rate ${liveUsdRate}.`:" No rate available — figures will show as unavailable."}`);
-    return liveUsdRate; // no fabricated fallback — 0 (or last known real rate) is returned as-is
+// Accepts "YYYY-MM-DD" (what the pipeline scripts write) or "M/D/YYYY" /
+// "MM/DD/YYYY" (what Excel/manual edits tend to produce) so a manual CSV
+// edit in either style doesn't break into "Invalid Date". Anything else
+// falls back to the native Date parser; unparseable rows return null and
+// are skipped by the caller rather than shown broken.
+function parseFlexibleDate(str) {
+    str = (str || "").trim();
+    let m = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (m) return new Date(+m[1], +m[2]-1, +m[3]);
+    m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (m) return new Date(+m[3], +m[1]-1, +m[2]);
+    const d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
 }
 
 function todayLabel(){return new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});}
@@ -404,7 +439,7 @@ function lineOpts(c, tickFmt, range){
                 border:{color:"transparent"}
             },
             x:{
-                ticks:{color:c.text,font:{size:10},maxTicksLimit:range==="10y"?12:range==="1y"?12:8,maxRotation:45,minRotation:0},
+                ticks:{color:c.text,font:{size:10},maxTicksLimit:range==="20y"?16:range==="10y"?12:range==="1y"?12:8,maxRotation:45,minRotation:0},
                 grid:{color:"transparent"},
                 border:{color:"transparent"}
             }
@@ -469,16 +504,18 @@ function lastNCalendarDays(history, days){
 
 // ── Data slices per range ────────────────────────────────────────
 function goldSlice(range){
-    if(range==="1w") return goldDailyHistory.slice(-7);
+    if(range==="1w") return lastNCalendarDays(goldDailyHistory, 7);
     if(range==="1m") return lastNCalendarDays(goldDailyHistory, 30);
-    if(range==="1y") return goldDailyHistory.slice(-261); // whatever real daily coverage actually exists (up to ~1 trading year)
-    return goldHistory; // 10Y: real annual averages, derived from actual fetched data (range varies with source coverage)
+    if(range==="1y") return lastNCalendarDays(goldDailyHistory, 365); // filters to the real last-365-days window, not just "whatever's in the array"
+    if(range==="20y") return goldHistory.slice(-20); // last 20 real annual points (fewer if less history exists — never fabricated)
+    return goldHistory.slice(-10); // 10Y: last 10 real annual averages, derived from actual fetched data
 }
 function usdSlice(range){
-    if(range==="1w") return usdDailyHistory.slice(-7);
+    if(range==="1w") return lastNCalendarDays(usdDailyHistory, 7);
     if(range==="1m") return lastNCalendarDays(usdDailyHistory, 30);
-    if(range==="1y") return usdDailyHistory.length>=12?usdDailyHistory:usdHistory.slice(-12);
-    return usdHistory;
+    if(range==="1y") return lastNCalendarDays(usdDailyHistory, 365);
+    if(range==="20y") return usdHistory.slice(-20);
+    return usdHistory.slice(-10);
 }
 
 // ── Daily regression forecast engine (for 7-Day widget) ──────────
@@ -556,7 +593,7 @@ function loadGoldChart(range){
     const c=C();
     const rawData=goldSlice(range);
     const data = range==="1y" ? monthlyAverage(rawData,"price") : rawData; // smoother chart line for 1Y
-    const show10y=range==="10y";
+    const show10y=range==="10y"||range==="20y";
     const {forecasts}=show10y?buildForecast(goldHistory,"price",10):{forecasts:[]};
 
     const hLabels=data.map(d=>d.date);
@@ -614,7 +651,7 @@ function loadGoldTable(histData,fcData,range){
     tbody.innerHTML="";
     const note=document.getElementById("gold-data-source-note");
     if(note){
-        if(range==="10y") note.textContent=goldHistory.length?`✅ Real annual averages (${goldHistory[0].year}–${goldHistory[goldHistory.length-1].year}), derived from live market data, + regression forecast for future years (forecast is a projection, not real data).`:"❌ Not enough real historical data yet to build annual averages.";
+        if(range==="10y"||range==="20y") note.textContent=histData.length?`✅ Real annual averages (${histData[0].year}–${histData[histData.length-1].year}), derived from live market data, + regression forecast for future years (forecast is a projection, not real data).`:"❌ Not enough real historical data yet to build annual averages.";
         else if(!usingRealGoldDaily || !histData.length) note.textContent="❌ No real data available right now (source unreachable or no overlapping USD↔MMK rate for these dates). Try 🔄 Refresh.";
         else if(range==="1y" && histData.length<261) note.textContent=`✅ 100% real daily data — ${histData.length} trading day(s) available. Converted using black market USD/MMK rate.`;
         else note.textContent="✅ 100% real data — gold price from freegoldapi.com (Yahoo Finance), converted to MMK using current black market rate.";
@@ -648,7 +685,7 @@ function loadUsdChart(range){
     const c=C();
     const rawData=usdSlice(range);
     const data = range==="1y" ? monthlyAverage(rawData,"rate") : rawData; // smoother chart line for 1Y
-    const show10y=range==="10y";
+    const show10y=range==="10y"||range==="20y";
     const {forecasts}=show10y?buildForecast(usdHistory,"rate",10):{forecasts:[]};
 
     const hLabels=data.map(d=>d.date);
@@ -702,7 +739,7 @@ function loadUsdTable(histData,fcData){
     const note=document.getElementById("usd-data-source-note");
     if(note){
         if(!histData.length) note.textContent="❌ No real USD/MMK rate available right now (all sources unreachable or implausible). Try 🔄 Refresh.";
-        else note.textContent="✅ Real data only — today's black market USD/MMK rate. No free API provides real historical black-market daily rates, so no past days are shown or estimated.";
+        else note.textContent=`✅ Real black-market data only (${histData[0].date} – ${histData[histData.length-1].date}), built server-side from real sources — no fabricated days. There's a gap around 2024-06 to whenever the daily pipeline was turned on (see pipeline/README.md).`;
     }
     if(fcData&&fcData.length){
         fcData.slice().reverse().forEach(f=>{
@@ -818,7 +855,10 @@ function updateMarketAnalysis(){
 
     // Trend + BUY/SELL/HOLD recommendations are now based on the last 1 MONTH
     // of real daily data (g30/u30), not the old annual-momentum basis.
-    const trend=g30>0?"UPTREND":"CONSOLIDATION";
+    // Three-way trend: a real decline must be able to show as DOWNTREND,
+    // not silently collapse into "CONSOLIDATION" the way a 2-way check did.
+    const TREND_THRESHOLD = 2; // % move over 30 days below which we call it flat
+    const trend = g30 > TREND_THRESHOLD ? "UPTREND" : g30 < -TREND_THRESHOLD ? "DOWNTREND" : "CONSOLIDATION";
     const vol=Math.abs(g5)>50?"High":"Medium";
 
     let gAct,ga;
@@ -831,13 +871,53 @@ function updateMarketAnalysis(){
     else if(u30<-5){uAct="SELL";ua="USD/MMK falling — a good time to convert USD back to MMK.";}
     else{uAct="HOLD";ua="USD/MMK fairly stable over the past month — no strong signal.";}
 
-    setEl("overall-trend",trend,`analysis-value ${trend==="UPTREND"?"uptrend":""}`);
+    setEl("overall-trend",trend,`analysis-value ${trend==="UPTREND"?"uptrend":trend==="DOWNTREND"?"downtrend":""}`);
     setEl("gold-30d-change",`${g30>=0?"+":""}${g30.toFixed(2)}%`,`analysis-value ${g30>=0?"positive":"negative"}`);
     setEl("usd-30d-change",`${u30>=0?"+":""}${u30.toFixed(2)}%`,`analysis-value ${u30>=0?"positive":"negative"}`);
     setEl("volatility",vol);setEl("gold-advice",ga);setEl("usd-advice",ua);
     setEl("gold-action",gAct,`rec-action ${gAct.toLowerCase()}`);setEl("gold-reason",ga);
     setEl("usd-action",uAct,`rec-action ${uAct.toLowerCase()}`);setEl("usd-reason",ua);
     setEl("trend",trend);setEl("confidence",`Confidence: ${Math.min(99,Math.round(55+Math.abs(g30)*2))}%`);
+
+    maybeAlertSignal("gold","Gold",gAct,ga);
+    maybeAlertSignal("usd","USD",uAct,ua);
+}
+
+// ================================================================
+//  BUY/SELL ALERT TOASTS
+// ================================================================
+// Fires an in-page toast whenever a BUY or SELL signal appears — but only
+// once per *change* of signal (not on every refresh/poll), so the user
+// isn't spammed with the same recommendation repeatedly. HOLD never alerts.
+function maybeAlertSignal(key, label, action, reason){
+    if(action==="HOLD") return;
+    const storeKey = `mmtracker_last_signal_${key}`;
+    const last = sessionStorage.getItem(storeKey);
+    if(last===action) return; // unchanged since last alert — don't repeat
+    sessionStorage.setItem(storeKey, action);
+    showAlertToast(action==="BUY"?"buy":"sell", `${label}: ${action} signal`, reason);
+}
+
+function showAlertToast(kind, title, msg){
+    const container = document.getElementById("alert-toast-container");
+    if(!container) return;
+    const el = document.createElement("div");
+    el.className = `alert-toast ${kind}`;
+    el.innerHTML = `
+        <div class="alert-icon">${kind==="buy"?"🟢":"🔴"}</div>
+        <div class="alert-body">
+            <div class="alert-title">${title}</div>
+            <div class="alert-msg">${msg}</div>
+        </div>
+        <button class="alert-close" aria-label="Dismiss">✕</button>`;
+    el.querySelector(".alert-close").addEventListener("click", ()=>dismissToast(el));
+    container.appendChild(el);
+    setTimeout(()=>dismissToast(el), 10000); // auto-dismiss after 10s
+}
+function dismissToast(el){
+    if(!el || !el.parentNode) return;
+    el.style.animation = "toastOut 0.2s ease-in forwards";
+    setTimeout(()=>el.remove(), 200);
 }
 function setEl(id,html,cls){const e=document.getElementById(id);if(!e)return;e.innerHTML=html;if(cls!==undefined)e.className=cls;}
 
@@ -853,7 +933,6 @@ async function convertCurrency(){
     el.innerHTML="Converting...";
     try{
         const mmk={USD:liveUsdRate};
-        myanmarFxData.forEach(c=>{const code=c.currency==="JPN"?"JPY":c.currency;const r=parseFloat(c.buy);if(code&&r>0)mmk[code]=r;});
         if(to==="MMK"&&mmk[from]){el.innerHTML=`${amount.toLocaleString()} ${from} = <strong>${Math.round(amount*mmk[from]).toLocaleString()} MMK</strong>`;return;}
         const r=await fetch(`${CURRENCY_API}?base=${from}&quotes=${to}`),d=await r.json();
         const rate=Array.isArray(d)?d[d.length-1]?.rate:(d.rate??d.rates?.[to]);
@@ -880,129 +959,6 @@ function updateLastUpdate(){
         {year:"numeric",month:"long",day:"numeric",hour:"2-digit",minute:"2-digit",second:"2-digit"});
 }
 
-// ================================================================
-//  USD HISTORY — Black market street rate (myanmar-currency-api)
-//  Real daily history, backfilled from myanmar-currency-api's commit
-//  history (see usd_backfill.py) into usd_history.csv and kept current
-//  by a daily GitHub Actions workflow. Today's live fetch is merged in
-//  on top (overriding any same-day CSV row) so the latest point is
-//  always as fresh as possible. Real per-day records can also merge in
-//  via loadRecentUsdFromCbm() below, for the (currently CORS-blocked)
-//  dates CBM's history API covers.
-// ================================================================
-async function fetchUsdHistoryFromRepo() {
-    try {
-        const res = await fetch(`${USD_HISTORY_CSV_URL}?t=${Date.now()}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const text = await res.text();
-        return parseUsdHistoryCsv(text);
-    } catch (e) {
-        console.warn("USD history CSV:", e);
-        dbg(`USD history CSV: unavailable (${e.message || e}) — falling back to live-rate-only.`);
-        return [];
-    }
-}
-
-function parseUsdHistoryCsv(text) {
-    const lines = text.trim().split("\n");
-    if (lines.length < 2) return [];
-    const header = lines[0].split(",");
-    const idx = Object.fromEntries(header.map((h, i) => [h.trim(), i]));
-    const rows = [];
-    for (let i = 1; i < lines.length; i++) {
-        const cols = lines[i].split(",");
-        if (cols.length < header.length) continue;
-        const iso = cols[idx.iso];
-        const buy = parseFloat(cols[idx.buy]);
-        if (!iso || !(buy > 0)) continue;
-        const d = new Date(iso + "T00:00:00");
-        rows.push({
-            year: d.getFullYear(),
-            date: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-            iso,
-            rate: buy,
-            change: 0 // recomputed after merge below
-        });
-    }
-    return rows; // already sorted ascending by the backfill script
-}
-
-async function loadUsdHistory(){
-    usdDailyHistory = await fetchUsdHistoryFromRepo();
-
-    if (liveUsdRate > 0) {
-        const today = new Date();
-        const todayIso = localIso(today);
-        usdDailyHistory = usdDailyHistory.filter(r => r.iso !== todayIso);
-        usdDailyHistory.push({
-            year: today.getFullYear(),
-            date: today.toLocaleDateString("en-US", {month:"short", day:"numeric"}),
-            iso: todayIso,
-            rate: liveUsdRate,
-            change: 0
-        });
-    }
-
-    // Recompute day-over-day change now that CSV history + live are merged.
-    usdDailyHistory.sort((a,b) => new Date(a.iso) - new Date(b.iso));
-    let prev = null;
-    usdDailyHistory.forEach(r => {
-        r.change = prev ? ((r.rate - prev) / prev * 100) : 0;
-        prev = r.rate;
-    });
-
-    dbg(`USD history: ${usdDailyHistory.length} real record(s) — backfilled CSV (myanmar-currency-api commit history) + live today`);
-}
-
-// ================================================================
-//  RECENT USD/MMK — Central Bank of Myanmar (official, real, no key)
-//  Frankfurter's MMK coverage can be inconsistent, so for the recent
-//  window that matters most (1W/1M) we fetch each day directly from
-//  CBM's own historical endpoint and let it OVERRIDE/fill Frankfurter
-//  data for those dates. No fabricated values — days CBM doesn't have
-//  are simply left as whatever (if anything) Frankfurter provided.
-// ================================================================
-function ddmmyyyy(d){
-    const dd=String(d.getDate()).padStart(2,"0");
-    const mm=String(d.getMonth()+1).padStart(2,"0");
-    return `${dd}-${mm}-${d.getFullYear()}`;
-}
-let cbmFirstError = null;
-async function fetchCbmHistoryDay(d){
-    try{
-        const res=await fetch(`${CBM_HISTORY_API}/${ddmmyyyy(d)}`);
-        if(!res.ok){ if(!cbmFirstError) cbmFirstError=`HTTP ${res.status} for ${ddmmyyyy(d)}`; return null; }
-        const j=await res.json();
-        const rate=parseFloat(j?.rates?.USD);
-        return rate>100 ? rate : null;
-    }catch(e){ if(!cbmFirstError) cbmFirstError=`${e.message||e} (likely CORS/network block)`; return null; }
-}
-async function loadRecentUsdFromCbm(daysBack){
-    dbg(`CBM: requesting last ${daysBack} days from ${CBM_HISTORY_API}/DD-MM-YYYY`);
-    const today=new Date();
-    const targets=[];
-    for(let i=daysBack;i>=0;i--){
-        const d=new Date(today); d.setDate(today.getDate()-i);
-        targets.push(d);
-    }
-    const results=await Promise.all(targets.map(fetchCbmHistoryDay));
-    const cbmMap=new Map(); // iso -> rate
-    results.forEach((rate,i)=>{ if(rate!=null) cbmMap.set(localIso(targets[i]), rate); });
-    dbg(`CBM: fetched ${cbmMap.size} of ${targets.length} requested days.${cbmFirstError?" First error: "+cbmFirstError:""}`);
-    if(!cbmMap.size) return; // CBM unreachable — keep whatever Frankfurter already gave us
-
-    // Merge: CBM values override/extend usdDailyHistory for the same dates
-    const byIso=new Map(usdDailyHistory.map(r=>[r.iso,r]));
-    cbmMap.forEach((rate,iso)=>{
-        const d=new Date(iso+"T00:00:00");
-        byIso.set(iso, {year:d.getFullYear(), date:d.toLocaleDateString("en-US",{month:"short",day:"numeric"}), iso, rate, change:0});
-    });
-    usdDailyHistory=[...byIso.values()].sort((a,b)=> new Date(a.iso)-new Date(b.iso));
-    let prev=null;
-    usdDailyHistory.forEach(r=>{ r.change = prev ? ((r.rate-prev)/prev*100) : 0; prev=r.rate; });
-    console.log("[USD history] after CBM merge:", usdDailyHistory.length, "total records");
-    dbg(`USD merged total: ${usdDailyHistory.length} records. Newest: ${JSON.stringify(usdDailyHistory[usdDailyHistory.length-1])}`);
-}
 async function loadGoldHistory(days){}
 
 // ================================================================
@@ -1049,6 +1005,9 @@ let modalRange = "1w";   // always defaults to 1 Week when opened
 // ── USD daily+annual merge (for modal 1Y/10Y — real daily where it
 // exists, one annual anchor per older year instead of fake monthly
 // interpolation) — mirrors the gold 10Y merge below.
+// years-of-history -> calendar days, used by the modal's 10y/20y views
+function yearsToDays(years){ return 365*years; }
+
 function usdDailyMerged(daysBack) {
     const cutoff = new Date();
     cutoff.setHours(0,0,0,0);
@@ -1075,7 +1034,7 @@ function usdDailyMerged(daysBack) {
 // 10Y → full ~2600 days (from the long daily history)
 function modalDailySlice(type, range) {
     const isGold = type === "gold";
-    if (range === "1w") return (isGold ? goldDailyHistory : usdDailyHistory).slice(-7);
+    if (range === "1w") return isGold ? goldSlice("1w") : usdSlice("1w");
     if (range === "1m") {
         if (!isGold) return usdSlice("1m");
         return goldSlice("1m"); // reuse the same trailing-30-day logic as the chart
@@ -1083,25 +1042,29 @@ function modalDailySlice(type, range) {
     if (range === "1y") {
         // Always show whatever real daily records exist — no arbitrary
         // count threshold. Fewer real days is still better than fake ones.
-        if (isGold) return goldDailyHistory.slice(-261);
+        if (isGold) return lastNCalendarDays(goldDailyHistory, 365);
         return usdDailyMerged(365);
     }
-    // 10y: show real weekday-level detail for as far back as usdDailyHistory
-    // goes, then one annual anchor per older year — not the old one-point-
-    // per-month interpolation.
-    if (!isGold) return usdDailyMerged(365*10);
+    // 10y / 20y: show real weekday-level detail for as far back as
+    // usdDailyHistory goes, then one annual anchor per older year within
+    // the selected window — not the old one-point-per-month interpolation.
+    const longRangeYears = range === "20y" ? 20 : 10;
+    if (!isGold) return usdDailyMerged(yearsToDays(longRangeYears));
     // Gold's real DAILY coverage only goes back to when freegoldapi.com's
     // Yahoo Finance feed starts (~2025). But the same feed also carries
     // real MONTHLY data (World Bank Pink Sheet) back to 1960 — so for
     // years without daily coverage we now show real monthly points
     // instead of one annual point; true annual anchors are only used as
     // a last-resort fallback for years neither source reaches.
+    const windowCutoffYear = new Date().getFullYear() - longRangeYears;
     const dailyYears = new Set(goldDailyHistory.map(d => new Date(d.iso+"T00:00:00").getFullYear()));
     const monthlyYears = new Set(goldMonthlyReal.map(d => new Date(d.iso+"T00:00:00").getFullYear()));
     const annualPart = goldHistory
-        .filter(h => !dailyYears.has(h.year) && !monthlyYears.has(h.year))
+        .filter(h => h.year >= windowCutoffYear && !dailyYears.has(h.year) && !monthlyYears.has(h.year))
         .map(h => ({...h, iso:`${h.year}-01-01`, _sort:new Date(h.year,0,1)}));
-    const monthlyPart = goldMonthlyReal.map(d => ({...d, _sort:new Date(d.iso+"T00:00:00")}));
+    const monthlyPart = goldMonthlyReal
+        .filter(d => new Date(d.iso+"T00:00:00").getFullYear() >= windowCutoffYear)
+        .map(d => ({...d, _sort:new Date(d.iso+"T00:00:00")}));
     const dailyPart = goldDailyHistory.map(d => ({...d, _sort:new Date(d.iso+"T00:00:00")}));
     return [...annualPart, ...monthlyPart, ...dailyPart].sort((a,b) => a._sort - b._sort);
 }
@@ -1123,8 +1086,8 @@ function renderModalTable() {
     const isGold = modalType === "gold";
     const data   = modalDailySlice(modalType, modalRange);
     const labels = isGold
-        ? { "10y":"10 Years (Monthly for older years + Daily since 2025)", "1y":"1 Year (Daily — real coverage may be partial)", "1m":"1 Month (Daily)", "1w":"1 Week (Daily)" }
-        : { "10y":"10 Years (Daily)", "1y":"1 Year (Daily)", "1m":"1 Month (Daily)", "1w":"1 Week (Daily)" };
+        ? { "20y":"20 Years (Monthly for older years + Daily since 2025)", "10y":"10 Years (Monthly for older years + Daily since 2025)", "1y":"1 Year (Daily — real coverage may be partial)", "1m":"1 Month (Daily)", "1w":"1 Week (Daily)" }
+        : { "20y":"20 Years (Daily)", "10y":"10 Years (Daily)", "1y":"1 Year (Daily)", "1m":"1 Month (Daily)", "1w":"1 Week (Daily)" };
 
     document.getElementById("modal-title").textContent    = isGold ? "Gold Price — Full History" : "USD/MMK Rate — Full History";
     document.getElementById("modal-subtitle").textContent = labels[modalRange] || modalRange;

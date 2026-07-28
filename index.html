@@ -8,6 +8,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body data-theme="dark">
+<div id="alert-toast-container" aria-live="polite"></div>
 <div class="container">
 
     <!-- HEADER -->
@@ -69,6 +70,7 @@
                 <div class="section-header">
                     <h2>📊 GOLD PRICE HISTORY</h2>
                     <div class="time-buttons">
+                        <button class="time-btn gold-btn" data-range="20y">20Y</button>
                         <button class="time-btn gold-btn active" data-range="10y">10Y</button>
                         <button class="time-btn gold-btn" data-range="1y">1Y</button>
                         <button class="time-btn gold-btn" data-range="1m">1M</button>
@@ -103,7 +105,7 @@
                 <div class="forecast-box">
                     <div class="forecast-header">
                         <span class="forecast-badge uptrend" id="gold-trend-badge">📈 ANALYZING</span>
-                        <span class="forecast-period">Next 10 years · Regression + momentum model</span>
+                        <span class="forecast-period">Next 7 days · Regression + momentum model</span>
                     </div>
                     <div class="forecast-visual">
                         <div class="forecast-bar">
@@ -115,7 +117,7 @@
                     </div>
                     <div class="forecast-footer">
                         <div class="confidence-high" id="gold-confidence">✅ Loading...</div>
-                        <div class="forecast-note">📊 Linear regression + 5-yr momentum · 2007–2026 dataset</div>
+                        <div class="forecast-note">📊 Linear regression + momentum model · based on real market data</div>
                     </div>
                 </div>
             </div>
@@ -128,6 +130,7 @@
                 <div class="section-header">
                     <h2>📊 USD EXCHANGE RATE HISTORY</h2>
                     <div class="time-buttons">
+                        <button class="time-btn usd-btn" data-range="20y">20Y</button>
                         <button class="time-btn usd-btn active" data-range="10y">10Y</button>
                         <button class="time-btn usd-btn" data-range="1y">1Y</button>
                         <button class="time-btn usd-btn" data-range="1m">1M</button>
@@ -154,6 +157,7 @@
                         </tbody>
                     </table>
                 </div>
+                <div id="usd-data-source-note" style="font-size:11px;opacity:0.55;margin-top:8px;"></div>
             </div>
 
             <div class="section">
@@ -180,11 +184,11 @@
             </div>
 
             <div class="section">
-                <h2>🔮 10-YEAR USD FORECAST</h2>
+                <h2>🔮 7 Days USD FORECAST</h2>
                 <div class="forecast-box">
                     <div class="forecast-header">
                         <span class="forecast-badge uptrend" id="usd-trend-badge">📈 ANALYZING</span>
-                        <span class="forecast-period">Next 10 years · Regression + momentum model</span>
+                        <span class="forecast-period">Next 7 days · Regression + momentum model</span>
                     </div>
                     <div class="forecast-visual">
                         <div class="forecast-bar">
@@ -196,7 +200,7 @@
                     </div>
                     <div class="forecast-footer">
                         <div class="confidence-high" id="usd-confidence">✅ Loading...</div>
-                        <div class="forecast-note">📊 Linear regression + 5-yr momentum · 2007–2026 dataset</div>
+                        <div class="forecast-note">📊 Linear regression + momentum model · based on real market data</div>
                     </div>
                 </div>
             </div>
@@ -272,6 +276,7 @@
             <button class="modal-close" id="modal-close">✕</button>
         </div>
         <div class="modal-range-buttons">
+            <button class="modal-range-btn" data-range="20y">20Y</button>
             <button class="modal-range-btn" data-range="10y">10Y</button>
             <button class="modal-range-btn" data-range="1y">1Y</button>
             <button class="modal-range-btn" data-range="1m">1M</button>
